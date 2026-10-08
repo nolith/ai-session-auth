@@ -1,8 +1,8 @@
-# Credenziali temporanee per un agente, con il tuo utente
+# Temporary credentials for AI agents, under your own identity
 
-Implementazione Go per GitHub.com e GitLab.com, Linux/macOS (amd64 e arm64).
-Nessuna dipendenza Go esterna. Per compilare: Go 1.23 o successivo, preferibilmente
-la release stabile aggiornata. Servono `git`, `gh` e `glab` nel PATH.
+A Go launcher for GitHub.com and GitLab.com on Linux and macOS (amd64 and arm64).
+It has no external Go dependencies. Build with Go 1.23 or later; use the latest
+stable release where possible. Install `git`, `gh`, and `glab` in your `PATH`.
 
 ```bash
 git clone https://github.com/nolith/ai-session-auth.git
@@ -10,40 +10,40 @@ cd ai-session-auth
 go build -o agent-auth .
 ```
 
-Il binario è indipendente dal runtime Go.
+The compiled binary does not require a Go runtime.
 
-Avvia un harness con accesso API e Git HTTPS usando la tua identità:
+Start an AI harness with API and Git HTTPS access under your own identity:
 
 ```bash
 ./agent-auth --config config.json run -- codex
 ```
 
-Puoi sostituire `codex` con qualsiasi comando e i suoi argomenti.
-Non sono necessarie chiavi SSH per i remote GitHub/GitLab standard.
+Replace `codex` with any command and its arguments.
+Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 
-## Cosa è implementato
+## Features
 
-- GitHub App **user access token**, non installation token/bot.
-- Autorizzazione iniziale con device flow; non serve client secret né chiave RSA.
-- Rinnovo GitHub su richiesta, cinque minuti prima della scadenza.
-- PAT GitLab **personale fine-grained** nuovo per ogni sessione.
-- Progetti GitLab selezionati e nessun permesso PAT-management nel token dell'agente.
-- Verifica del nome utente su entrambi i provider prima di avviare l'harness.
-- Wrapper `gh` e `glab` che leggono il token corrente e invocano le CLI originali.
-- Git credential helper che controlla protocollo, hostname e percorso del repository.
-- Riscrittura temporanea dei remote SSH standard in HTTPS tramite configurazione di processo.
-- Revoca del PAT GitLab all'uscita normale, su Ctrl-C/SIGTERM o al limite di durata.
-- Stato GitHub scritto atomicamente, file segreti chmod 600 e lock tra sessioni.
-- Nessun token in output ordinario, argv o URL Git.
+- GitHub App **user access tokens**, acting as you rather than an installation bot.
+- Initial authorization through device flow, without a client secret or RSA key.
+- GitHub token refresh on demand, starting five minutes before expiry.
+- A new **personal fine-grained GitLab PAT** for each session.
+- GitLab access restricted to selected projects, without PAT management permissions in the agent token.
+- Username verification on both providers before starting the harness.
+- `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
+- A Git credential helper that checks protocol, hostname, and repository path.
+- Temporary SSH-to-HTTPS URL rewriting through process-level Git configuration.
+- GitLab PAT revocation on normal exit, Ctrl-C/SIGTERM, or the session time limit.
+- Atomic GitHub state updates, private secret files, and locking across sessions.
+- No tokens in normal launcher output, command-line arguments, or Git URLs.
 
-## Setup GitHub, una volta
+## One-time GitHub setup
 
-1. Apri https://github.com/settings/apps e registra una GitHub App.
-2. Disabilita i webhook, che questo client non usa. Non servono servizi pubblici.
-3. Abilita **Device flow** e mantieni abilitata la scadenza degli user access token.
-4. Configura questi repository permissions:
+1. Open https://github.com/settings/apps and register a GitHub App.
+2. Disable webhooks; this client does not use them. No public service is required.
+3. Enable **Device flow** and keep user access token expiration enabled.
+4. Configure these repository permissions:
 
-| Permesso | Livello |
+| Permission | Level |
 |---|---|
 | Contents | Read and write |
 | Issues | Read and write |
@@ -51,93 +51,94 @@ Non sono necessarie chiavi SSH per i remote GitHub/GitLab standard.
 | Actions | Read and write |
 | Checks | Read-only |
 | Commit statuses | Read-only |
-| Metadata | Read-only, automatico |
+| Metadata | Read-only, automatic |
 
-Se vuoi modificare i file `.github/workflows/`, aggiungi **Workflows: write**.
-Non aggiungere Administration, Secrets o privilegi di bypass delle protezioni.
+To edit `.github/workflows/` files, also enable **Workflows: write**.
+Leave Administration, Secrets, and protection bypass privileges disabled.
 
-5. Installa la App sul tuo account/organizzazione scegliendo i repository interessati.
-   Per un'organizzazione possono servire approvazione dell'amministratore e SSO attivo.
-6. Copia il **Client ID** (non l'App ID) nel file di configurazione.
-7. Imposta `expected_user` sul tuo login GitHub.
+5. Install the App on your account or organization, selecting the required repositories.
+   Organizations may require administrator approval and an active SSO session.
+6. Copy the **Client ID**, not the App ID, into the configuration.
+7. Set `expected_user` to your GitHub username.
 
-Gli user token consentono le operazioni che sia il tuo utente sia la App possono fare.
-L'identità autore dei commit dipende anche da `git config user.name/user.email`:
-il token determina l'utente che esegue il push, non riscrive l'autore del commit.
+User tokens can perform only operations allowed to both your user and the App.
+Commit authorship also depends on `git config user.name/user.email`: the token
+identifies the user performing the push; it does not rewrite the commit author.
 
-## Setup GitLab.com, una volta
+## One-time GitLab.com setup
 
-Apri https://gitlab.com/-/user_settings/personal_access_tokens.
-Crea un PAT **emittente** per il tuo utente, distinto dai PAT destinati all'agente.
+Open https://gitlab.com/-/user_settings/personal_access_tokens.
+Create an **issuer PAT** for your own user, separate from the agent's session PATs.
 
-La soluzione preferita è un PAT emittente fine-grained che abbia:
+Prefer a fine-grained issuer PAT with:
 
-- Nel boundary **User**: Personal Access Token: **Create, Read, Revoke**;
-  User: **Read** per verificare l'identità.
-- Nei progetti selezionati: almeno tutti i permessi del token dell'agente,
-  indicati in `gitlab.granular_scopes` in `config.example.json`.
+- In the **User** boundary: Personal Access Token **Create, Read, Revoke**;
+  User **Read** to verify your identity.
+- In the selected projects: at least every permission granted to the agent token,
+  as listed in `gitlab.granular_scopes` in `config.example.json`.
 
-Nomi API dei privilegi dell'emittente nel boundary User:
+The API permission names for the issuer's User boundary are:
 
 ```json
 ["create_personal_access_token", "read_personal_access_token", "revoke_personal_access_token", "read_user"]
 ```
 
-Un token emittente fine-grained può creare solo PAT con permessi e confini
-uguali o più limitati ai propri. Avere solo Create PAT non basta per emettere
-un token capace di fare push. Read e Revoke servono alla pulizia della sessione.
+A fine-grained issuer can create PATs only with permissions and resource
+boundaries equal to or narrower than its own. Create PAT alone cannot issue a
+push-capable token. Read and Revoke are needed for session cleanup.
 
-Come alternativa di bootstrap puoi usare un tuo PAT legacy con scope `api`.
-In entrambi i casi il token consegnato all'agente viene creato **fine-grained**.
-Il PAT emittente resta soggetto alla propria scadenza e alle policy di GitLab.com;
-questa versione non rinnova automaticamente la credenziale emittente.
+Alternatively, bootstrap with your own legacy PAT with the `api` scope.
+The token issued to the agent is **fine-grained** in either case.
+The issuer remains subject to its own expiry and GitLab.com policies;
+this version does not automatically renew the issuer credential.
 
-Recupera l'ID numerico di ciascun progetto e aggiorna tutti e tre:
+Find each project's numeric ID and update all three settings:
 
-- `gitlab.repositories`: percorsi esatti, per esempio `nolith/project`;
-- `gitlab.project_ids`: ID numerici;
-- `resourceIds`: `gid://gitlab/Project/ID` nei granular scopes.
+- `gitlab.repositories`: exact paths, such as `nolith/project`;
+- `gitlab.project_ids`: numeric project IDs;
+- `resourceIds`: `gid://gitlab/Project/ID` in the granular scopes.
 
-Il launcher interroga i progetti e controlla che ID e percorsi coincidano.
-Il profilo incluso copre codice, issue/commenti, creazione/modifica MR, pipeline,
-job e artifact in lettura. I privilegi distruttivi, amministrativi e di merge
-sono esclusi dal profilo iniziale. Git push resta governato dai tuoi privilegi
-e dalle branch protection del progetto.
+The launcher queries the projects and verifies that their IDs and paths match.
+The included profile covers code, issues and comments, MR creation and updates,
+pipeline and job control, and artifact reads. Destructive, administrative, and
+merge permissions are excluded from the initial profile. Git pushes remain
+subject to your user permissions and the project's branch protections.
 
-## Configurazione e avvio
+## Configuration and launch
 
 ```bash
 cp config.example.json config.json
-# Modifica Client ID, username, repository e ID GitLab prima di continuare.
+# Set the Client ID, usernames, repositories, and GitLab project IDs before proceeding.
 ./agent-auth --config config.json save-gitlab-issuer
 ./agent-auth --config config.json github-login
 ./agent-auth --config config.json run -- codex
 ```
 
-`save-gitlab-issuer` chiede il PAT con input nascosto; non metterlo nel comando
-o nel file config. Lo salva nel percorso `issuer_token_file`, con mode 600.
-`github-login` mostra URL e codice monouso da autorizzare nel browser; non stampa
-i token ricevuti. Lo stato viene salvato nel percorso `state_file`.
+`save-gitlab-issuer` prompts for the PAT with hidden input. Do not put it in the
+command line or configuration file. It saves the PAT at `issuer_token_file`
+with mode 600. `github-login` displays a URL and a one-time code to authorize
+in your browser; it does not print the returned tokens. It saves the OAuth
+state at `state_file`.
 
-Per avviare l'harness da un checkout diverso, passa percorsi assoluti:
+Use absolute paths to launch the harness from another checkout:
 
 ```bash
 /path/ai-session-auth/agent-auth \
   --config /path/ai-session-auth/config.json run -- codex
 ```
 
-La directory corrente e gli argomenti del comando vengono conservati.
-Per provare solo un provider imposta `enabled: false` per l'altro.
+The current working directory and command arguments are preserved.
+To use only one provider, set `enabled: false` for the other.
 
-## Verifica sul tuo account
+## Verify on your account
 
-Prima della sessione operativa puoi aprire una shell di verifica:
+Before starting an operational session, open a verification shell:
 
 ```bash
 ./agent-auth --config config.json run -- bash
 ```
 
-Dentro la shell, verifica l'identità e operazioni di sola lettura:
+Inside the shell, verify your identity and read-only operations:
 
 ```bash
 gh api user --jq .login
@@ -149,93 +150,96 @@ git ls-remote origin
 exit
 ```
 
-La creazione del PAT GitLab avviene realmente anche per questa verifica e il PAT
-viene revocato all'uscita. Non stampa le credenziali in questi comandi.
-La verifica completa di push, commenti, creazione MR/PR e controllo pipeline
-va eseguita su un repository di prova che scegli tu.
+This verification creates a real GitLab session PAT and revokes it on exit.
+These commands do not print the credentials. Test pushes, comments, PR/MR
+creation, and pipeline control on a test repository of your choice.
 
-## Durata e comportamento delle sessioni
+## Session lifetime and behavior
 
-`session_hours` è 24 per default, massimo 48. La scadenza GitLab è arrotondata
-alla mezzanotte UTC successiva alla fine prevista della sessione. Quindi:
+`session_hours` defaults to 24 and has a maximum of 48. GitLab expiry is rounded
+up to midnight UTC at or after the planned end of the session:
 
-| Sessione richiesta | Durata di fallback del PAT GitLab |
+| Requested session | GitLab PAT fallback lifetime |
 |---|---|
-| 24 ore | Da 24 a meno di 48 ore |
-| 48 ore | Da 48 a meno di 72 ore |
+| 24 hours | At least 24 and less than 48 hours |
+| 48 hours | At least 48 and less than 72 hours |
 
-L'arrotondamento evita che il token scada prima della fine della sessione.
-Normalmente viene revocato quando l'harness termina; se il computer si spegne,
-il launcher è ucciso con SIGKILL o la rete non funziona, scade alla data prevista.
-Il broker smette di fornire token al limite configurato e il launcher termina
-il gruppo di processi dell'harness. Processi che si staccano deliberatamente
-dal gruppo non possono essere garantiti come terminati.
+Rounding prevents the token from expiring before the session ends.
+Normally, the PAT is revoked when the harness exits. If the computer shuts down,
+the launcher receives SIGKILL, or revocation fails because of a network error,
+the PAT expires on its configured date. At the session limit, the broker stops
+issuing credentials and the launcher terminates the harness process group.
+Processes that deliberately detach from that group are not guaranteed to stop.
 
-GitHub usa token da otto ore e rinnova il refresh token nello stato persistente.
-Sessioni parallele della stessa App/utente condividono la credenziale GitHub
-corrente; ogni wrapper la recupera nuovamente. Non si revoca GitHub all'uscita,
-per non invalidare altre sessioni o il refresh token: l'access token scade.
-Una copia di quel token rimane valida fino alla sua scadenza effettiva.
-Un comando `gh` già avviato non può cambiare token durante la propria esecuzione;
-per watch lunghi che attraversano la scadenza bisogna rilanciare il comando.
+GitHub access tokens last eight hours, with rotating refresh tokens stored in
+persistent state. Concurrent sessions for the same App and user share the
+current GitHub credential; each wrapper retrieves it afresh. The launcher does
+not revoke GitHub credentials on exit, which would invalidate other sessions
+or the refresh token. A copied access token remains valid until its actual
+expiry or earlier invalidation by GitHub.
+A running `gh` command cannot replace its token while it executes; restart
+long-running watch commands if they cross a token expiry or rotation.
 
-## Confini della prima versione
+## Limits and isolation
 
-Questo launcher gestisce il ciclo delle credenziali, **non è una sandbox**.
-Il PAT emittente e il refresh token non sono passati all'harness, ma se l'agente
-gira con il tuo stesso utente e può leggere liberamente la tua home, può leggere
-i file segreti chmod 600. Per l'isolamento servono un utente distinto, una sandbox
-che nasconda quei percorsi o un broker esterno. Il socket di sessione consente
-di ottenere i token temporanei: è intenzionale.
+This launcher manages credential lifecycles; **it is not a sandbox**.
+The issuer PAT and refresh token are not passed to the harness. However, an
+agent running as your OS user with unrestricted access to your home directory
+can read the mode-600 secret files. Isolation requires a separate OS user,
+a sandbox that hides those paths, or an external broker. The session socket
+intentionally provides access to the temporary tokens.
 
-L'allowlist del credential helper limita dove il helper restituisce token;
-non limita l'uso API delle CLI. GitLab applica server-side i progetti nei granular
-scopes. GitHub applica server-side i repository accessibili alla App: la lista
-`github.repositories` di questa versione limita Git, non riduce ulteriormente
-l'accesso API del token. Installa la App solo sui repository necessari.
+The credential helper's allowlist controls where the helper returns tokens;
+it does not restrict the CLIs' API calls. GitLab enforces project boundaries
+through the token's granular scopes. GitHub enforces the repositories accessible
+to the App: `github.repositories` restricts Git credential delivery and does
+not further narrow the token's API access. Install the App only on the required
+repositories.
 
-I wrapper richiedono che l'harness erediti PATH, `AI_AUTH_SOCKET` e `GIT_CONFIG_*`.
-Un container senza socket montato o una shell che ripulisce queste variabili
-richiede adattamento. Invocare `/usr/bin/gh` direttamente salta il wrapper.
-I config CLI sono temporanei, per evitare il login personale preesistente;
-alias/extension e preferenze personali non sono copiati automaticamente.
+The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`.
+A container without the socket mounted, or a shell that clears these variables,
+requires additional configuration. Calling `/usr/bin/gh` directly bypasses
+the wrapper. CLI configuration directories are temporary; personal aliases,
+extensions, and preferences are not copied automatically.
 
-La riscrittura copre `git@github.com:owner/repo.git`, `ssh://git@github.com/...`
-e i corrispondenti remote GitLab.com. Alias SSH e host/porte personalizzati
-non sono supportati. La configurazione Git sul disco non viene modificata.
-I remote devono essere privi di token/password incorporati nell'URL.
-La firma dei commit SSH/GPG rimane una configurazione separata.
+URL rewriting supports `git@github.com:owner/repo.git`,
+`ssh://git@github.com/...`, and their GitLab.com equivalents. SSH aliases and
+custom hosts or ports are unsupported. Git configuration on disk is unchanged.
+Remotes must not contain embedded tokens or passwords.
+SSH/GPG commit signing is configured separately.
 
-Gli scope inclusi sono un profilo iniziale basato sulla documentazione corrente.
-Alcuni comandi glab/gh fanno query accessorie e possono richiedere permessi
-aggiuntivi: un 403 non comporta ampliamento automatico dei privilegi.
-Git LFS e harness con comportamento speciale di terminale vanno verificati
-localmente. Un crash durante la rotazione GitHub dopo l'emissione ma prima
-del salvataggio può richiedere una nuova autorizzazione device.
+The included scopes are an initial profile based on provider documentation.
+Some `glab` and `gh` commands make additional queries and may require extra
+permissions. A 403 never causes automatic privilege expansion.
+Verify Git LFS and harnesses with special terminal behavior locally.
+A crash during GitHub refresh, after issuance but before saving the rotated
+credentials, may require another device authorization.
 
-## Test
+## Tests
 
 ```bash
 go test -race ./...
 go vet ./...
 ```
 
-I test coprono identità, scadenze UTC, rinnovo concorrente e lock cancellabile,
-persistenza dei segreti, creazione/revoca del PAT, corrispondenza progetti,
-allowlist, protocollo Git credential, riscrittura dei remote tramite Git reale,
-RPC su socket Unix, exit code, timeout del gruppo di processi e input cancellabile.
-Le API dei provider sono simulate: nessun test usa credenziali reali.
-La CI esegue questi controlli su Linux e macOS con Go stabile.
+Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
+secret persistence, PAT creation and revocation, project matching, repository
+allowlists, the Git credential protocol, URL rewriting with real Git, UNIX
+socket RPC, exit codes, process-group timeouts, and cancellable issuer input.
+Provider APIs are simulated; tests do not use real credentials.
+CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
+with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.
 
-Nel runtime di creazione è vietata la creazione di socket Unix: il relativo test
-è saltato solo in caso di EPERM/EACCES. Il launcher richiede un ambiente che
-consenta socket Unix. I flussi autenticati reali richiedono il setup descritto
-sopra e non sono stati eseguiti sui tuoi account.
+The environment used to build the initial implementation prohibits UNIX socket
+creation, so the socket test is skipped there on EPERM/EACCES. The launcher
+requires an environment that allows UNIX sockets. Real authenticated provider
+flows require the setup above and have not been tested on your accounts.
 
-Lo stato GitHub e il formato config sono compatibili con il precedente launcher
-Python: puoi riusare i file esistenti. Non mettere stato OAuth o PAT nel repository.
+The GitHub state and configuration formats are compatible with the previous
+Python launcher, so existing files can be reused. Keep OAuth state and PATs
+out of the repository.
 
-## Fonti tecniche
+## Technical references
 
 - https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
 - https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
