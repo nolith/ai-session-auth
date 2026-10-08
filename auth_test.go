@@ -217,7 +217,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 			return 500, nil
 		}
 	})
-	g := &GitLab{Config: c, API: api, Issuer: "issuer", Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
+	g := &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
 	token, err := g.create(context.Background(), 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
@@ -240,7 +240,7 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 		}
 		return 200, map[string]string{"path_with_namespace": "wrong/project"}
 	})
-	g := &GitLab{Config: testConfig().GitLab, API: api, Issuer: "issuer", Now: time.Now}
+	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}

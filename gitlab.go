@@ -16,10 +16,31 @@ const createPAT = `mutation AgentToken($input: PersonalAccessTokenCreateInput!) 
  personalAccessTokenCreate(input: $input) { token errors }
 }`
 
+// issuer performs the GitLab requests made with the issuer credential.
+// Endpoints are relative to /api/v4, as in "user" or "projects/42".
+type issuer interface {
+	rest(ctx context.Context, method, endpoint string, out any) error
+	graphql(ctx context.Context, query string, variables map[string]any, out any) error
+}
+
+// bearerIssuer sends the requests itself, with the PAT from issuer_token_file.
+type bearerIssuer struct {
+	api   *API
+	token string
+}
+
+// The issuer's REST calls are all GET or DELETE, so they carry no body.
+func (b bearerIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
+	return b.api.request(ctx, method, b.api.GitLabURL+"/api/v4/"+endpoint, b.token, nil, false, out)
+}
+func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
+	payload := map[string]any{"query": query, "variables": variables}
+	return b.api.request(ctx, http.MethodPost, b.api.GitLabURL+"/api/graphql", b.token, payload, false, out)
+}
+
 type GitLab struct {
 	Config  GitLabConfig
-	API     *API
-	Issuer  string
+	Issuer  issuer
 	Created []string
 	Now     func() time.Time
 }
@@ -29,11 +50,11 @@ func newGitLab(config GitLabConfig, api *API) (*GitLab, error) {
 	if err != nil {
 		return nil, err
 	}
-	issuer := strings.TrimSpace(string(raw))
-	if issuer == "" {
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &GitLab{Config: config, API: api, Issuer: issuer, Now: time.Now}, nil
+	return &GitLab{Config: config, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now}, nil
 }
 func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
 	if err := validateScopes(g.Config); err != nil {
@@ -42,7 +63,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	var user struct {
 		Username string `json:"username"`
 	}
-	if err := g.API.request(ctx, http.MethodGet, g.API.GitLabURL+"/api/v4/user", g.Issuer, nil, false, &user); err != nil {
+	if err := g.Issuer.rest(ctx, http.MethodGet, "user", &user); err != nil {
 		return "", err
 	}
 	if user.Username == "" || user.Username != g.Config.ExpectedUser {
@@ -53,7 +74,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 		var project struct {
 			Path string `json:"path_with_namespace"`
 		}
-		if err := g.API.request(ctx, http.MethodGet, fmt.Sprintf("%s/api/v4/projects/%d", g.API.GitLabURL, id), g.Issuer, nil, false, &project); err != nil {
+		if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("projects/%d", id), &project); err != nil {
 			return "", err
 		}
 		paths[project.Path] = true
@@ -71,9 +92,9 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 		return "", err
 	}
 	name := "ai-session-" + hex.EncodeToString(random)
-	payload := map[string]any{"query": createPAT, "variables": map[string]any{"input": map[string]any{
+	variables := map[string]any{"input": map[string]any{
 		"name": name, "expiresAt": expiryForDuration(g.Now(), duration), "granularScopes": g.Config.Scopes,
-	}}}
+	}}
 	var result struct {
 		Errors []any `json:"errors"`
 		Data   struct {
@@ -83,7 +104,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 			} `json:"personalAccessTokenCreate"`
 		} `json:"data"`
 	}
-	if err := g.API.request(ctx, http.MethodPost, g.API.GitLabURL+"/api/graphql", g.Issuer, payload, false, &result); err != nil {
+	if err := g.Issuer.graphql(ctx, createPAT, variables, &result); err != nil {
 		return "", err
 	}
 	if len(result.Errors) > 0 || len(result.Data.Create.Errors) > 0 || result.Data.Create.Token == "" {
@@ -100,7 +121,7 @@ func (g *GitLab) revokeCreated(ctx context.Context) error {
 			ID   int64  `json:"id"`
 			Name string `json:"name"`
 		}
-		if err := g.API.request(ctx, http.MethodGet, g.API.GitLabURL+"/api/v4/personal_access_tokens?"+query, g.Issuer, nil, false, &matches); err != nil {
+		if err := g.Issuer.rest(ctx, http.MethodGet, "personal_access_tokens?"+query, &matches); err != nil {
 			return err
 		}
 		var id int64
@@ -114,7 +135,7 @@ func (g *GitLab) revokeCreated(ctx context.Context) error {
 		if count != 1 || id <= 0 {
 			return errors.New("cannot uniquely resolve session PAT for revocation")
 		}
-		if err := g.API.request(ctx, http.MethodDelete, fmt.Sprintf("%s/api/v4/personal_access_tokens/%d", g.API.GitLabURL, id), g.Issuer, nil, false, nil); err != nil {
+		if err := g.Issuer.rest(ctx, http.MethodDelete, fmt.Sprintf("personal_access_tokens/%d", id), nil); err != nil {
 			return err
 		}
 		g.Created = g.Created[1:]
