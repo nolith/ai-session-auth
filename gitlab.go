@@ -4,10 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -38,6 +44,95 @@ func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[s
 	return b.api.request(ctx, http.MethodPost, b.api.GitLabURL+"/api/graphql", b.token, payload, false, out)
 }
 
+// glabIssuer delegates to the user's own glab login, which renews its OAuth
+// token itself, so revocation still works hours after the session started.
+type glabIssuer struct {
+	executable string // absolute, resolved before the session PATH exists
+	lockPath   string // withFileLock adds ".lock": one OAuth refresh at a time
+}
+
+// glabUnset keeps the issuer on the user's own gitlab.com login: no token or
+// temporary config from an enclosing session (without AI_AUTH_SOCKET, that
+// session's glab wrapper fails instead of answering), no host override, and no
+// HTTP debugging, which prints credentials.
+var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "AI_AUTH_SOCKET", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
+
+func newGlabIssuer() (glabIssuer, error) {
+	executable, err := executableLookup("glab")
+	if err != nil {
+		return glabIssuer{}, errors.New("install glab and add it to PATH")
+	}
+	if executable, err = filepath.Abs(executable); err != nil {
+		return glabIssuer{}, err
+	}
+	state, err := stateDirectory()
+	if err != nil {
+		return glabIssuer{}, err
+	}
+	return glabIssuer{executable: executable, lockPath: filepath.Join(state, "glab")}, nil
+}
+func stateDirectory() (string, error) {
+	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
+		return filepath.Join(state, "ai-session-auth"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "ai-session-auth"), nil
+}
+func (g glabIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
+	return g.run(ctx, out, "--method", method, endpoint)
+}
+
+// glab sends GraphQL variables from fields, with -F parsing JSON objects and
+// arrays; a JSON string would arrive with its quotes. A whole body through
+// `--input -` arrives as an empty document (glab 1.120: "Unexpected end of
+// document").
+func (g glabIssuer) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
+	args := []string{"graphql", "-f", "query=" + query}
+	for _, name := range slices.Sorted(maps.Keys(variables)) {
+		raw, err := json.Marshal(variables[name])
+		if err != nil {
+			return err
+		}
+		if raw[0] != '{' && raw[0] != '[' {
+			return errors.New("glab issuer GraphQL variables must be objects or arrays")
+		}
+		args = append(args, "-F", name+"="+string(raw))
+	}
+	return g.run(ctx, out, args...)
+}
+func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
+	// Pinned: otherwise glab picks the host from the cwd's remote.
+	args = append([]string{"api", "--hostname", "gitlab.com"}, args...)
+	return withFileLock(ctx, g.lockPath, func() error {
+		// A locked keychain must fail the request, not hang the session.
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		command := exec.CommandContext(ctx, g.executable, args...)
+		// Outside any repository, so no remote can fill glab's placeholders.
+		command.Dir = "/"
+		environment := environmentMap(os.Environ())
+		for _, key := range glabUnset {
+			delete(environment, key)
+		}
+		command.Env = environmentList(environment)
+		output, err := command.Output()
+		if err != nil {
+			// glab's output may quote the response; keep it out of the logs.
+			return errors.New("glab issuer request failed")
+		}
+		if out == nil {
+			return nil
+		}
+		if json.Unmarshal(output, out) != nil {
+			return errors.New("glab issuer returned invalid JSON")
+		}
+		return nil
+	})
+}
+
 type GitLab struct {
 	Config  GitLabConfig
 	Issuer  issuer
@@ -46,6 +141,13 @@ type GitLab struct {
 }
 
 func newGitLab(config GitLabConfig, api *API) (*GitLab, error) {
+	if config.Issuer == "glab" {
+		glab, err := newGlabIssuer()
+		if err != nil {
+			return nil, err
+		}
+		return &GitLab{Config: config, Issuer: glab, Now: time.Now}, nil
+	}
 	raw, err := privateRead(config.IssuerTokenFile)
 	if err != nil {
 		return nil, err

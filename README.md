@@ -26,7 +26,8 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - GitHub App **user access tokens**, acting as you rather than an installation bot.
 - Initial authorization through device flow, without a client secret or RSA key.
 - GitHub token refresh on demand, starting five minutes before expiry.
-- A new **personal fine-grained GitLab PAT** for each session.
+- A new **personal fine-grained GitLab PAT** for each session, issued through
+  your own `glab` login or a stored issuer PAT.
 - GitLab access restricted to selected projects, without PAT management permissions in the agent token.
 - Username verification on both providers before starting the harness.
 - `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
@@ -67,6 +68,44 @@ identifies the user performing the push; it does not rewrite the commit author.
 
 ## One-time GitLab.com setup
 
+The **issuer** is the credential that creates, finds and revokes each
+session's PAT: either your own `glab` login or a PAT you store.
+
+### Issuer: your glab login
+
+If `glab auth login` works for gitlab.com, set `"issuer": "glab"` in the
+`gitlab` section and leave out `issuer_token_file`. The two cannot be
+combined, and `save-gitlab-issuer` has nothing to save.
+
+Every issuer request then runs `glab api --hostname gitlab.com ...`:
+
+- Nothing is stored and nothing needs rotating. An OAuth login renews its own
+  token, which lasts two hours, so revocation at exit still works in longer
+  sessions. A copy of glab's current token would not.
+- The login needs the `api` scope, which `glab auth login` requests. GitLab
+  checks a new PAT against its creator's permissions only when the creator is
+  itself fine-grained, so a legacy-scoped OAuth login can create it.
+- glab is resolved on your `PATH` at start, runs from `/` and is pinned to
+  gitlab.com: neither the current repository's remote nor glab's `:fullpath`
+  style placeholders can redirect a request.
+- glab runs without `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`,
+  `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, `AI_AUTH_SOCKET`, host overrides or HTTP
+  debugging, so it acts with your own login, never with a session's.
+- Calls are serialized through `$XDG_STATE_HOME/ai-session-auth/glab.lock`
+  (`~/.local/state/ai-session-auth/glab.lock` by default). GitLab returns a
+  new refresh token on every refresh, so two glab processes refreshing at once
+  can race. The lock covers agent-auth's own calls, not yours.
+- Each call gets one minute, so a keyring waiting to be unlocked fails the
+  request instead of stalling the session.
+- glab's output is never printed. A failure reports only "glab issuer request
+  failed"; run the same `glab api` command yourself to see why.
+
+If the login breaks (`glab auth logout`, a failed refresh, a revoked
+authorization), sessions fail to start, and running sessions cannot revoke
+their PATs, which then expire on their own. `glab auth login` fixes both.
+
+### Issuer: a stored PAT
+
 Open https://gitlab.com/-/user_settings/personal_access_tokens.
 Create an **issuer PAT** for your own user, separate from the agent's session PATs.
 
@@ -92,6 +131,8 @@ The token issued to the agent is **fine-grained** in either case.
 The issuer remains subject to its own expiry and GitLab.com policies;
 this version does not automatically renew the issuer credential.
 
+### Projects
+
 Find each project's numeric ID and update all three settings:
 
 - `gitlab.repositories`: exact paths, such as `nolith/project`;
@@ -109,7 +150,7 @@ subject to your user permissions and the project's branch protections.
 ```bash
 cp config.example.json config.json
 # Set the Client ID, usernames, repositories, and GitLab project IDs before proceeding.
-./agent-auth --config config.json save-gitlab-issuer
+./agent-auth --config config.json save-gitlab-issuer   # not with issuer "glab"
 ./agent-auth --config config.json github-login
 ./agent-auth --config config.json run -- codex
 ```
@@ -185,7 +226,9 @@ long-running watch commands if they cross a token expiry or rotation.
 This launcher manages credential lifecycles; **it is not a sandbox**.
 The issuer PAT and refresh token are not passed to the harness. However, an
 agent running as your OS user with unrestricted access to your home directory
-can read the mode-600 secret files. Isolation requires a separate OS user,
+can read the mode-600 secret files. With the glab issuer, it can likewise run
+the real `glab` with your login, by path or without the session's
+`GLAB_CONFIG_DIR` and `GITLAB_TOKEN`. Isolation requires a separate OS user,
 a sandbox that hides those paths, or an external broker. The session socket
 intentionally provides access to the temporary tokens.
 
@@ -223,9 +266,11 @@ go vet ./...
 ```
 
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
-secret persistence, PAT creation and revocation, project matching, repository
-allowlists, the Git credential protocol, URL rewriting with real Git, UNIX
-socket RPC, exit codes, process-group timeouts, and cancellable issuer input.
+secret persistence, PAT creation and revocation, the glab issuer through a
+fake `glab` (arguments, environment, locking, silent failures), project
+matching, repository allowlists, the Git credential protocol, URL rewriting
+with real Git, UNIX socket RPC, exit codes, process-group timeouts, and
+cancellable issuer input.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
 with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.
@@ -244,6 +289,8 @@ out of the repository.
 - https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
 - https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
 - https://docs.gitlab.com/auth/tokens/fine_grained_access_tokens/
+- https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/graphql/mutations/users/personal_access_tokens/create.rb
+- https://docs.gitlab.com/cli/api/
 - https://docs.gitlab.com/api/graphql/reference/experimental/input_objects/#personalaccesstokencreateinput
 - https://gitlab.com/gitlab-org/gitlab/-/merge_requests/228600
 - https://docs.gitlab.com/auth/tokens/fine_grained_access_tokens_rest/

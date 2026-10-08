@@ -27,7 +27,8 @@ type GitHubConfig struct {
 type GitLabConfig struct {
 	Enabled         *bool    `json:"enabled,omitempty"`
 	ExpectedUser    string   `json:"expected_user"`
-	IssuerTokenFile string   `json:"issuer_token_file"`
+	Issuer          string   `json:"issuer,omitempty"`
+	IssuerTokenFile string   `json:"issuer_token_file,omitempty"`
 	Repositories    []string `json:"repositories"`
 	ProjectIDs      []int64  `json:"project_ids"`
 	Scopes          []Scope  `json:"granular_scopes"`
@@ -82,7 +83,7 @@ func loadConfig(path string) (Config, error) {
 			return config, err
 		}
 	}
-	if enabled(config.GitLab.Enabled) {
+	if enabled(config.GitLab.Enabled) && config.GitLab.IssuerTokenFile != "" {
 		config.GitLab.IssuerTokenFile, err = expandPath(config.GitLab.IssuerTokenFile, base)
 		if err != nil {
 			return config, err
@@ -128,8 +129,20 @@ func (c Config) validate() error {
 		return errors.New("configure GitHub client_id, expected_user and state_file")
 	}
 	if enabled(c.GitLab.Enabled) {
-		if c.GitLab.ExpectedUser == "" || c.GitLab.IssuerTokenFile == "" {
-			return errors.New("configure GitLab expected_user and issuer_token_file")
+		if c.GitLab.ExpectedUser == "" {
+			return errors.New("configure GitLab expected_user")
+		}
+		switch c.GitLab.Issuer {
+		case "":
+			if c.GitLab.IssuerTokenFile == "" {
+				return errors.New(`configure GitLab issuer_token_file, or issuer "glab"`)
+			}
+		case "glab":
+			if c.GitLab.IssuerTokenFile != "" {
+				return errors.New(`GitLab issuer "glab" and issuer_token_file are mutually exclusive`)
+			}
+		default:
+			return errors.New(`GitLab issuer must be "glab" or omitted`)
 		}
 		if err := validateScopes(c.GitLab); err != nil {
 			return err

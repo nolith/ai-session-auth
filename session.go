@@ -108,6 +108,15 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	if err != nil {
 		return 1, err
 	}
+	// Before the session's own wrappers exist: a glab issuer resolves the glab
+	// on your PATH.
+	var gitlab *GitLab
+	if enabled(config.GitLab.Enabled) {
+		gitlab, err = newGitLab(config.GitLab, api)
+		if err != nil {
+			return 1, err
+		}
+	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
 	directory, err := os.MkdirTemp("/tmp", "ai-auth-")
 	if err != nil {
@@ -127,13 +136,6 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 			return 1, err
 		}
 		if err = github.verify(ctx, token); err != nil {
-			return 1, err
-		}
-	}
-	var gitlab *GitLab
-	if enabled(config.GitLab.Enabled) {
-		gitlab, err = newGitLab(config.GitLab, api)
-		if err != nil {
 			return 1, err
 		}
 	}

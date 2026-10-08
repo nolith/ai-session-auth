@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -253,5 +255,215 @@ func TestAPIErrorsDoNotExposeSecrets(t *testing.T) {
 	}
 	if api.request(context.Background(), "GET", "http://gitlab.com", "token", nil, false, nil) == nil {
 		t.Fatal("accepted HTTP")
+	}
+}
+
+// fakeGlab writes a glab into a new directory and returns it. Each call
+// records its arguments (NUL-separated), environment and directory there, and
+// is answered as gitlab.com would for alice and group/project (ID 42).
+func fakeGlab(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+log=` + shellQuote(dir) + `
+n=$(($(cat "$log/count" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$log/count"
+printf '%s\0' "$@" >"$log/args.$n"
+env >"$log/env.$n"
+pwd >"$log/cwd.$n"
+if [ -n "${FAKE_GLAB_FAIL-}" ]; then
+	echo 'glab-secret on stdout'
+	echo 'glab-secret on stderr' >&2
+	exit 1
+fi
+for last; do :; done
+case $last in
+user) echo '{"username":"alice"}' ;;
+projects/42) echo '{"path_with_namespace":"group/project"}' ;;
+input=*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
+'personal_access_tokens?'*)
+	name=${last##*search=}
+	name=${name%%&*}
+	printf '[{"id":99,"name":"%s-other"},{"id":42,"name":"%s"}]\n' "$name" "$name"
+	;;
+personal_access_tokens/42) ;;
+*)
+	echo "unexpected $last" >&2
+	exit 1
+	;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "glab"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+func fakeGlabCalls(t *testing.T, dir string) [][]string {
+	t.Helper()
+	var calls [][]string
+	for n := 1; ; n++ {
+		raw, err := os.ReadFile(filepath.Join(dir, "args."+strconv.Itoa(n)))
+		if errors.Is(err, os.ErrNotExist) {
+			return calls
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls = append(calls, strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00"))
+	}
+}
+func glabConfig() GitLabConfig {
+	c := testConfig().GitLab
+	c.Issuer, c.IssuerTokenFile = "glab", ""
+	return c
+}
+
+func TestGlabIssuerCreateAndRevoke(t *testing.T) {
+	dir := fakeGlab(t)
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+path)
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	for _, key := range glabUnset {
+		t.Setenv(key, "outer-secret")
+	}
+	g, err := newGitLab(glabConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A glab found on PATH later, such as a session wrapper, must not be used.
+	decoy := t.TempDir()
+	os.WriteFile(filepath.Join(decoy, "glab"), []byte("#!/bin/sh\nexit 1\n"), 0700)
+	t.Setenv("PATH", decoy+string(os.PathListSeparator)+path)
+	g.Now = func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }
+	token, err := g.create(context.Background(), 24*time.Hour)
+	if err != nil || token != "session-secret" {
+		t.Fatalf("%s %v", token, err)
+	}
+	if err = g.revokeCreated(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	calls := fakeGlabCalls(t, dir)
+	if len(calls) != 5 {
+		t.Fatalf("got %d glab calls: %q", len(calls), calls)
+	}
+	host := []string{"api", "--hostname", "gitlab.com"}
+	for i, call := range calls {
+		if !slices.Equal(call[:3], host) {
+			t.Errorf("call %d not pinned to gitlab.com: %q", i+1, call)
+		}
+	}
+	for i, want := range [][]string{{"--method", "GET", "user"}, {"--method", "GET", "projects/42"}} {
+		if !slices.Equal(calls[i][3:], want) {
+			t.Errorf("call %d: %q", i+1, calls[i])
+		}
+	}
+	mint := calls[2][3:]
+	if len(mint) != 5 || mint[0] != "graphql" || mint[1] != "-f" || mint[2] != "query="+createPAT || mint[3] != "-F" || !strings.HasPrefix(mint[4], "input=") {
+		t.Fatalf("mint: %q", mint)
+	}
+	var input struct {
+		Name      string  `json:"name"`
+		ExpiresAt string  `json:"expiresAt"`
+		Scopes    []Scope `json:"granularScopes"`
+	}
+	if err = json.Unmarshal([]byte(strings.TrimPrefix(mint[4], "input=")), &input); err != nil {
+		t.Fatal(err)
+	}
+	name := input.Name
+	if !strings.HasPrefix(name, "ai-session-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 || input.Scopes[1].ResourceIDs[0] != "gid://gitlab/Project/42" {
+		t.Errorf("bad PAT input %+v", input)
+	}
+	if !slices.Equal(calls[3][3:], []string{"--method", "GET", "personal_access_tokens?per_page=100&search=" + name}) {
+		t.Errorf("search: %q", calls[3])
+	}
+	if !slices.Equal(calls[4][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
+		t.Errorf("revocation: %q", calls[4])
+	}
+	for n := 1; n <= len(calls); n++ {
+		raw, _ := os.ReadFile(filepath.Join(dir, "env."+strconv.Itoa(n)))
+		env := "\n" + string(raw)
+		for _, key := range glabUnset {
+			if strings.Contains(env, "\n"+key+"=") {
+				t.Errorf("call %d inherited %s", n, key)
+			}
+		}
+		if !strings.Contains(env, "\nHOME=") {
+			t.Errorf("call %d lost HOME, which glab needs for its login", n)
+		}
+		cwd, _ := os.ReadFile(filepath.Join(dir, "cwd."+strconv.Itoa(n)))
+		if strings.TrimSpace(string(cwd)) != "/" {
+			t.Errorf("call %d ran in %q", n, cwd)
+		}
+	}
+	info, err := os.Stat(filepath.Join(state, "ai-session-auth", "glab.lock"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("lock: %v %v", info, err)
+	}
+}
+func TestGlabIssuerFailureIsSilent(t *testing.T) {
+	dir := fakeGlab(t)
+	t.Setenv("FAKE_GLAB_FAIL", "1")
+	issuer := glabIssuer{executable: filepath.Join(dir, "glab"), lockPath: filepath.Join(t.TempDir(), "glab")}
+	captured, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = captured, captured
+	restErr := issuer.rest(context.Background(), http.MethodGet, "user", new(any))
+	graphqlErr := issuer.graphql(context.Background(), createPAT, map[string]any{"input": map[string]any{}}, new(any))
+	os.Stdout, os.Stderr = stdout, stderr
+	for _, err := range []error{restErr, graphqlErr} {
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("unsafe error %v", err)
+		}
+	}
+	if raw, _ := os.ReadFile(captured.Name()); len(raw) != 0 {
+		t.Fatalf("glab output reached the launcher's: %q", raw)
+	}
+	if len(fakeGlabCalls(t, dir)) != 2 {
+		t.Fatal("glab not called")
+	}
+}
+func TestGlabIssuerRejectsScalarVariables(t *testing.T) {
+	dir := fakeGlab(t)
+	issuer := glabIssuer{executable: filepath.Join(dir, "glab"), lockPath: filepath.Join(t.TempDir(), "glab")}
+	if issuer.graphql(context.Background(), createPAT, map[string]any{"name": "x"}, new(any)) == nil {
+		t.Fatal("sent a JSON string through -F")
+	}
+	if len(fakeGlabCalls(t, dir)) != 0 {
+		t.Fatal("called glab")
+	}
+}
+func TestGlabIssuerConfig(t *testing.T) {
+	c := testConfig()
+	c.GitLab = glabConfig()
+	if err := c.validate(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw, _ := json.Marshal(c)
+	os.WriteFile(path, raw, 0600)
+	loaded, err := loadConfig(path)
+	if err != nil || loaded.GitLab.IssuerTokenFile != "" {
+		t.Fatalf("%q %v", loaded.GitLab.IssuerTokenFile, err)
+	}
+	// Refused before reading stdin or touching any file.
+	code, err := execute(context.Background(), []string{"--config", path, "save-gitlab-issuer", "--stdin"}, nil)
+	if code != 1 || err == nil || !strings.Contains(err.Error(), "glab") {
+		t.Fatalf("save-gitlab-issuer: %d %v", code, err)
+	}
+	for _, mutate := range []func(*GitLabConfig){
+		func(g *GitLabConfig) { g.IssuerTokenFile = "issuer.txt" },
+		func(g *GitLabConfig) { g.Issuer = "file" },
+		func(g *GitLabConfig) { g.Issuer = "" },
+	} {
+		c = testConfig()
+		c.GitLab = glabConfig()
+		mutate(&c.GitLab)
+		if c.validate() == nil {
+			t.Fatalf("accepted issuer %q with issuer_token_file %q", c.GitLab.Issuer, c.GitLab.IssuerTokenFile)
+		}
 	}
 }

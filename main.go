@@ -17,7 +17,7 @@ func usage(output io.Writer) {
 
 Commands:
   github-login                  Authorize your GitHub App once via device flow
-  save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600
+  save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600 (not with issuer "glab")
   run -- HARNESS [ARGS...]       Start a session with user credentials
 
 Requires gh, glab and Git in PATH for enabled providers. Linux/macOS only.`)
@@ -65,6 +65,9 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 	case "save-gitlab-issuer":
 		if !enabled(config.GitLab.Enabled) {
 			return 1, errors.New("GitLab is disabled")
+		}
+		if config.GitLab.Issuer == "glab" {
+			return 1, errors.New(`GitLab issuer is "glab": your glab login, with no PAT to save`)
 		}
 		fromStdin := len(rest) == 2 && rest[1] == "--stdin"
 		if len(rest) > 1 && !fromStdin {
