@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -144,6 +145,37 @@ func TestHarnessExitAndTimeout(t *testing.T) {
 		t.Fatalf("%d %v", code, err)
 	}
 }
+
+func TestHarnessTimeoutKillsChildrenAfterLeaderExits(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	script := "trap 'exit 0' TERM; (trap '' TERM; exec sleep 30) & child=$!; printf '%s' \"$child\" > " + shellQuote(pidFile) + "; wait"
+	code, err := runHarness(context.Background(), []string{"/bin/sh", "-c", script}, os.Environ(), 100*time.Millisecond)
+	if code != 124 || err == nil {
+		t.Fatalf("%d %v", code, err)
+	}
+	raw, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	pid, parseErr := strconv.Atoi(string(raw))
+	if parseErr != nil {
+		t.Fatalf("invalid child pid %q: %v", raw, parseErr)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		err = syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			// Avoid leaking the test child if the assertion fails.
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("child process %d survived session shutdown: %v", pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestIssuerReadCancellation(t *testing.T) {
 	read, write, err := os.Pipe()
 	if err != nil {

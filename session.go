@@ -63,14 +63,43 @@ func runHarness(ctx context.Context, args, environment []string, duration time.D
 		code = 124
 	}
 	syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
-	select {
-	case <-wait:
-	case <-time.After(5 * time.Second):
-		syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		<-wait
-	}
+	stopProcessGroup(command.Process.Pid, wait, 5*time.Second)
 	return code, reason
 }
+
+func stopProcessGroup(processGroup int, wait <-chan error, grace time.Duration) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	leaderExited := false
+	for {
+		if !leaderExited {
+			select {
+			case <-wait:
+				leaderExited = true
+			default:
+			}
+		}
+		groupErr := syscall.Kill(-processGroup, 0)
+		groupExists := groupErr == nil || errors.Is(groupErr, syscall.EPERM)
+		if leaderExited && !groupExists {
+			return
+		}
+		select {
+		case <-wait:
+			leaderExited = true
+		case <-ticker.C:
+		case <-timer.C:
+			syscall.Kill(-processGroup, syscall.SIGKILL)
+			if !leaderExited {
+				<-wait
+			}
+			return
+		}
+	}
+}
+
 func runSession(ctx context.Context, config Config, args []string, api *API, output io.Writer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
