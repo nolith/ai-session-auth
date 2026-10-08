@@ -1,0 +1,4 @@
+/agent-auth
+/config.json
+/dist/
+*.lock
