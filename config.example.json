@@ -9,24 +9,18 @@
   },
   "gitlab": {
     "enabled": true,
+    "issuer": "glab",
     "expected_user": "YOUR_GITLAB_USERNAME",
-    "issuer_token_file": "~/.local/state/ai-session-auth/gitlab-issuer.txt",
-    "repositories": ["YOUR_NAMESPACE/YOUR_PROJECT"],
-    "project_ids": [12345],
-    "granular_scopes": [
-      {"access": "USER", "permissions": ["read_user"]},
-      {
-        "access": "SELECTED_MEMBERSHIPS",
-        "resourceIds": ["gid://gitlab/Project/12345"],
-        "permissions": [
-          "read_project", "read_member", "read_label",
-          "read_repository", "read_commit", "read_branch", "read_code", "download_code", "push_code",
-          "read_work_item", "create_work_item", "update_work_item",
-          "read_merge_request", "create_merge_request", "update_merge_request",
-          "read_pipeline", "create_pipeline", "update_pipeline",
-          "read_job", "run_job", "update_job", "read_job_artifact"
-        ]
-      }
+    "groups": ["YOUR_GROUP"],
+    "personal_projects": true,
+    "projects": ["SOME_GROUP/YOUR_PROJECT"],
+    "permissions": [
+      "read_project", "read_member", "read_label",
+      "read_repository", "read_commit", "read_branch", "read_code", "download_code", "push_code",
+      "read_work_item", "create_work_item", "update_work_item",
+      "read_merge_request", "create_merge_request", "update_merge_request",
+      "read_pipeline", "create_pipeline", "update_pipeline",
+      "read_job", "run_job", "update_job", "read_job_artifact"
     ]
   }
 }

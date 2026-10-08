@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,14 +44,11 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		if request.Protocol != "https" {
 			return BrokerResponse{}, nil
 		}
-		var allowed []string
 		switch request.Host {
 		case "github.com":
 			service = "github"
-			allowed = b.Config.GitHub.Repositories
 		case "gitlab.com":
 			service = "gitlab"
-			allowed = b.Config.GitLab.Repositories
 		default:
 			return BrokerResponse{}, nil
 		}
@@ -58,12 +56,11 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		if !ok {
 			return BrokerResponse{}, nil
 		}
-		permitted := false
-		for _, repo := range allowed {
-			if (service == "github" && strings.EqualFold(repo, path)) || repo == path {
-				permitted = true
-				break
-			}
+		var permitted bool
+		if service == "github" {
+			permitted = slices.ContainsFunc(b.Config.GitHub.Repositories, func(repo string) bool { return strings.EqualFold(repo, path) })
+		} else {
+			permitted = gitlabAllowed(b.Config.GitLab, path)
 		}
 		if !permitted {
 			return BrokerResponse{}, nil
@@ -86,6 +83,21 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		}
 	}
 	return BrokerResponse{}, errors.New("service not enabled")
+}
+
+// gitlabAllowed reports whether a Git path is inside the configured namespaces:
+// whole leading segments only, so "gitlab-org" never matches "gitlab-org-foo".
+// Explicit projects and the earlier format's repositories match exactly.
+func gitlabAllowed(c GitLabConfig, path string) bool {
+	if slices.Contains(c.Repositories, path) || slices.Contains(c.Projects, path) {
+		return true
+	}
+	// A copy: concurrent requests share the configuration.
+	namespaces := slices.Clone(c.Groups)
+	if c.PersonalProjects {
+		namespaces = append(namespaces, c.ExpectedUser)
+	}
+	return slices.ContainsFunc(namespaces, func(namespace string) bool { return strings.HasPrefix(path, namespace+"/") })
 }
 
 type BrokerServer struct {

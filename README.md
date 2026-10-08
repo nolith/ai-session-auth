@@ -28,7 +28,8 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - GitHub token refresh on demand, starting five minutes before expiry.
 - A new **personal fine-grained GitLab PAT** for each session, issued through
   your own `glab` login or a stored issuer PAT.
-- GitLab access restricted to selected projects, without PAT management permissions in the agent token.
+- GitLab access restricted to selected groups, your personal projects or single
+  projects, without PAT management permissions in the agent token.
 - Username verification on both providers before starting the harness.
 - `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
 - A Git credential helper that checks protocol, hostname, and repository path.
@@ -113,8 +114,9 @@ Prefer a fine-grained issuer PAT with:
 
 - In the **User** boundary: Personal Access Token **Create, Read, Revoke**;
   User **Read** to verify your identity.
-- In the selected projects: at least every permission granted to the agent token,
-  as listed in `gitlab.granular_scopes` in `config.example.json`.
+- In the allowlisted groups and projects, and your personal projects if
+  enabled: at least every permission granted to the agent token, as listed in
+  `gitlab.permissions` in `config.example.json`.
 
 The API permission names for the issuer's User boundary are:
 
@@ -131,25 +133,56 @@ The token issued to the agent is **fine-grained** in either case.
 The issuer remains subject to its own expiry and GitLab.com policies;
 this version does not automatically renew the issuer credential.
 
-### Projects
+### Allowlist
 
-Find each project's numeric ID and update all three settings:
+List what agents may reach by path, with no numeric IDs:
+
+- `gitlab.groups`: groups such as `gitlab-org` or `gitlab-org/ai`. A group
+  covers its subgroups and all their projects.
+- `gitlab.personal_projects`: `true` adds the projects in your own namespace,
+  `expected_user/...`.
+- `gitlab.projects`: single projects, such as `some-group/project`.
+- `gitlab.permissions`: one list, granted on all of the above.
+
+At session start, each group and project is looked up with `GET groups/:path`
+or `GET projects/:path` and refused unless GitLab reports the same path, in the
+same case, so a renamed or mistyped namespace stops the session before any PAT
+exists. The session PAT then gets `read_user` on your user (`USER`), the
+permissions on the resolved groups and projects (`SELECTED_MEMBERSHIPS`), and
+on your personal projects (`PERSONAL_PROJECTS`) if enabled. `ALL_MEMBERSHIPS`
+and `INSTANCE` are never requested, and PAT management permissions are refused.
+
+The Git credential helper offers the token only for paths inside these
+namespaces, by whole segments: `gitlab-org` covers `gitlab-org/gitlab` and
+`gitlab-org/ai/skills`, never `gitlab-org-foo/project`. Paths are
+case-sensitive, and `projects` match exactly.
+
+A group grant is wide: with `gitlab-org`, a session can push branches, open
+merge requests and run jobs in every project there that your role allows, not
+only the one it works on. The included profile covers code, issues and
+comments, MR creation and updates, pipeline and job control, and artifact
+reads. Destructive, administrative, and merge permissions are excluded from
+the initial profile. Git pushes remain subject to your user permissions and
+the project's branch protections.
+
+#### Project IDs (earlier format)
+
+Configurations with exact `repositories`, numeric `project_ids` and
+hand-written `granular_scopes` keep working, but cannot be mixed with the
+fields above:
 
 - `gitlab.repositories`: exact paths, such as `nolith/project`;
 - `gitlab.project_ids`: numeric project IDs;
-- `resourceIds`: `gid://gitlab/Project/ID` in the granular scopes.
+- `gitlab.granular_scopes`: `USER` with `read_user`, and `SELECTED_MEMBERSHIPS`
+  with `resourceIds` such as `gid://gitlab/Project/ID`.
 
 The launcher queries the projects and verifies that their IDs and paths match.
-The included profile covers code, issues and comments, MR creation and updates,
-pipeline and job control, and artifact reads. Destructive, administrative, and
-merge permissions are excluded from the initial profile. Git pushes remain
-subject to your user permissions and the project's branch protections.
 
 ## Configuration and launch
 
 ```bash
 cp config.example.json config.json
-# Set the Client ID, usernames, repositories, and GitLab project IDs before proceeding.
+# Set the Client ID, usernames, GitHub repositories and GitLab groups before proceeding.
 ./agent-auth --config config.json save-gitlab-issuer   # not with issuer "glab"
 ./agent-auth --config config.json github-login
 ./agent-auth --config config.json run -- codex
@@ -233,11 +266,11 @@ a sandbox that hides those paths, or an external broker. The session socket
 intentionally provides access to the temporary tokens.
 
 The credential helper's allowlist controls where the helper returns tokens;
-it does not restrict the CLIs' API calls. GitLab enforces project boundaries
-through the token's granular scopes. GitHub enforces the repositories accessible
-to the App: `github.repositories` restricts Git credential delivery and does
-not further narrow the token's API access. Install the App only on the required
-repositories.
+it does not restrict the CLIs' API calls. GitLab enforces the group and
+project boundaries through the token's granular scopes. GitHub enforces the
+repositories accessible to the App: `github.repositories` restricts Git
+credential delivery and does not further narrow the token's API access.
+Install the App only on the required repositories.
 
 The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`.
 A container without the socket mounted, or a shell that clears these variables,
@@ -267,8 +300,8 @@ go vet ./...
 
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
-fake `glab` (arguments, environment, locking, silent failures), project
-matching, repository allowlists, the Git credential protocol, URL rewriting
+fake `glab` (arguments, environment, locking, silent failures), group and
+project resolution, scope building, namespace and repository allowlists, the Git credential protocol, URL rewriting
 with real Git, UNIX socket RPC, exit codes, process-group timeouts, and
 cancellable issuer input.
 Provider APIs are simulated; tests do not use real credentials.

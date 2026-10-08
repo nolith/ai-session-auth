@@ -189,3 +189,39 @@ func TestIssuerReadCancellation(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+func TestBrokerGitLabNamespaces(t *testing.T) {
+	now := time.Now()
+	c := testConfig()
+	c.GitLab = namespacedConfig()
+	b := &Broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitLabToken: "gl-test"}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"group/project.git", true},
+		{"group/sub/deeper/project", true},
+		{"other/sub/project", true},
+		{"alice/dotfiles.git", true},
+		{"elsewhere/project", true},
+		{"group-foo/project", false},
+		{"groupx/project", false},
+		{"other/subway/project", false},
+		{"other/project", false},
+		{"elsewhere/project-2", false},
+		{"elsewhere/project/sub", false},
+		{"alice-bot/project", false},
+		{"GROUP/project", false},
+		{"group", false},
+		{"group/../evil/project", false},
+		{"group/%2e%2e/evil", false},
+	} {
+		r, err := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "gitlab.com", Path: tc.path, Protocol: "https"})
+		if err != nil || (r.Token != "") != tc.want {
+			t.Errorf("%+v: %+v %v", tc, r, err)
+		}
+	}
+	b.Config.GitLab.PersonalProjects = false
+	if r, _ := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "gitlab.com", Path: "alice/dotfiles", Protocol: "https"}); r.Token != "" {
+		t.Fatal("personal project allowed without personal_projects")
+	}
+}

@@ -35,6 +35,12 @@ func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *API {
 	return a
 }
 func boolPointer(v bool) *bool { return &v }
+
+// namespacedConfig allows two groups (one a subgroup), alice's personal
+// projects and one project elsewhere.
+func namespacedConfig() GitLabConfig {
+	return GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Groups: []string{"group", "other/sub"}, PersonalProjects: true, Projects: []string{"elsewhere/project"}, Permissions: []string{"read_project", "push_code"}}
+}
 func testConfig() Config {
 	return Config{SessionHours: 24, GitHub: GitHubConfig{ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}, GitLab: GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Repositories: []string{"group/project"}, ProjectIDs: []int64{42}, Scopes: []Scope{{Access: "USER", Permissions: []string{"read_user"}}, {Access: "SELECTED_MEMBERSHIPS", ResourceIDs: []string{"gid://gitlab/Project/42"}, Permissions: []string{"read_project", "push_code"}}}}}
 }
@@ -466,4 +472,139 @@ func TestGlabIssuerConfig(t *testing.T) {
 			t.Fatalf("accepted issuer %q with issuer_token_file %q", c.GitLab.Issuer, c.GitLab.IssuerTokenFile)
 		}
 	}
+}
+
+func TestGitLabNamespacedConfig(t *testing.T) {
+	c := testConfig()
+	c.GitLab = namespacedConfig()
+	if err := c.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*GitLabConfig){
+		"mixed with repositories":     func(g *GitLabConfig) { g.Repositories = []string{"group/project"} },
+		"mixed with project_ids":      func(g *GitLabConfig) { g.ProjectIDs = []int64{42} },
+		"mixed with granular_scopes":  func(g *GitLabConfig) { g.Scopes = testConfig().GitLab.Scopes },
+		"no namespace":                func(g *GitLabConfig) { g.Groups, g.PersonalProjects, g.Projects = nil, false, nil },
+		"no permissions":              func(g *GitLabConfig) { g.Permissions = nil },
+		"PAT management":              func(g *GitLabConfig) { g.Permissions = append(g.Permissions, "revoke_personal_access_token") },
+		"own namespace as a group":    func(g *GitLabConfig) { g.Groups = append(g.Groups, "alice") },
+		"group with a trailing slash": func(g *GitLabConfig) { g.Groups = []string{"group/"} },
+		"group with dot segments":     func(g *GitLabConfig) { g.Groups = []string{"group/../other"} },
+		"duplicate group":             func(g *GitLabConfig) { g.Groups = []string{"group", "group"} },
+		"project without namespace":   func(g *GitLabConfig) { g.Projects = []string{"project"} },
+	} {
+		c := testConfig()
+		c.GitLab = namespacedConfig()
+		mutate(&c.GitLab)
+		if c.validate() == nil {
+			t.Errorf("accepted %s", name)
+		}
+	}
+	// The earlier format can never ask for every membership or the instance.
+	for _, access := range []string{"ALL_MEMBERSHIPS", "INSTANCE", "PERSONAL_PROJECTS"} {
+		c := testConfig()
+		c.GitLab.Scopes = append(c.GitLab.Scopes, Scope{Access: access, Permissions: []string{"read_project"}})
+		if c.validate() == nil {
+			t.Errorf("accepted %s", access)
+		}
+	}
+	// The shipped example must load as it is.
+	if _, err := loadConfig("config.example.json"); err != nil {
+		t.Fatalf("config.example.json: %v", err)
+	}
+}
+func TestGitLabNamespacedScopes(t *testing.T) {
+	var scopes []Scope
+	var lookups []string
+	api := mockAPI(t, func(r *http.Request) (int, any) {
+		switch {
+		case r.URL.Path == "/api/v4/user":
+			return 200, map[string]string{"username": "alice"}
+		case r.URL.Path == "/api/graphql":
+			var payload struct {
+				Variables struct {
+					Input struct {
+						Scopes []Scope `json:"granularScopes"`
+					} `json:"input"`
+				} `json:"variables"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			scopes = payload.Variables.Input.Scopes
+			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
+		}
+		// Subgroup and project paths must travel as one escaped segment.
+		lookups = append(lookups, r.URL.EscapedPath())
+		switch r.URL.EscapedPath() {
+		case "/api/v4/groups/group":
+			return 200, map[string]any{"id": 7, "full_path": "group"}
+		case "/api/v4/groups/other%2Fsub":
+			return 200, map[string]any{"id": 8, "full_path": "other/sub"}
+		case "/api/v4/projects/elsewhere%2Fproject":
+			return 200, map[string]any{"id": 42, "path_with_namespace": "elsewhere/project"}
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.EscapedPath())
+		return 404, nil
+	})
+	g := &GitLab{Config: namespacedConfig(), Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
+		t.Fatalf("%s %v", token, err)
+	}
+	if len(lookups) != 3 {
+		t.Fatalf("lookups %q", lookups)
+	}
+	permissions := []string{"read_project", "push_code"}
+	want := []Scope{
+		{Access: "USER", Permissions: []string{"read_user"}},
+		{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: []string{"gid://gitlab/Group/7", "gid://gitlab/Group/8", "gid://gitlab/Project/42"}, Permissions: permissions},
+		{Access: "PERSONAL_PROJECTS", Permissions: permissions},
+	}
+	if got, _ := json.Marshal(scopes); string(got) != string(must(json.Marshal(want))) {
+		t.Fatalf("scopes %s", got)
+	}
+	// Without personal projects or explicit lists, only what is configured.
+	c := namespacedConfig()
+	c.Groups, c.Projects = nil, nil
+	g = &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	if _, err := g.create(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := json.Marshal(scopes); string(got) != string(must(json.Marshal([]Scope{want[0], want[2]}))) {
+		t.Fatalf("personal-only scopes %s", got)
+	}
+}
+func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer map[string]any
+	}{
+		{"renamed group", map[string]any{"id": 7, "full_path": "renamed"}},
+		{"case differs", map[string]any{"id": 7, "full_path": "Group"}},
+		{"no id", map[string]any{"full_path": "group"}},
+		{"project fields for a group", map[string]any{"id": 7, "path_with_namespace": "group"}},
+	} {
+		minted := false
+		api := mockAPI(t, func(r *http.Request) (int, any) {
+			switch r.URL.Path {
+			case "/api/v4/user":
+				return 200, map[string]string{"username": "alice"}
+			case "/api/graphql":
+				minted = true
+			}
+			return 200, tc.answer
+		})
+		c := namespacedConfig()
+		c.Groups, c.Projects = []string{"group"}, nil
+		g := &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+		if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
+			t.Errorf("%s: minted (err %v)", tc.name, err)
+		}
+	}
+}
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
 }

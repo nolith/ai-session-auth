@@ -159,7 +159,7 @@ func newGitLab(config GitLabConfig, api *API) (*GitLab, error) {
 	return &GitLab{Config: config, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now}, nil
 }
 func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
-	if err := validateScopes(g.Config); err != nil {
+	if err := validateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
 	var user struct {
@@ -171,23 +171,9 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	if user.Username == "" || user.Username != g.Config.ExpectedUser {
 		return "", errors.New("GitLab issuer user does not match expected_user")
 	}
-	paths := map[string]bool{}
-	for _, id := range g.Config.ProjectIDs {
-		var project struct {
-			Path string `json:"path_with_namespace"`
-		}
-		if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("projects/%d", id), &project); err != nil {
-			return "", err
-		}
-		paths[project.Path] = true
-	}
-	if len(paths) != len(g.Config.Repositories) {
-		return "", errors.New("GitLab project IDs do not match repository allowlist")
-	}
-	for _, repo := range g.Config.Repositories {
-		if !paths[repo] {
-			return "", errors.New("GitLab project IDs do not match repository allowlist")
-		}
+	scopes, err := g.scopes(ctx)
+	if err != nil {
+		return "", err
 	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
@@ -195,7 +181,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	}
 	name := "ai-session-" + hex.EncodeToString(random)
 	variables := map[string]any{"input": map[string]any{
-		"name": name, "expiresAt": expiryForDuration(g.Now(), duration), "granularScopes": g.Config.Scopes,
+		"name": name, "expiresAt": expiryForDuration(g.Now(), duration), "granularScopes": scopes,
 	}}
 	var result struct {
 		Errors []any `json:"errors"`
@@ -214,6 +200,80 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	}
 	g.Created = append(g.Created, name)
 	return result.Data.Create.Token, nil
+}
+
+// scopes returns the session PAT's scopes. Groups and projects are resolved by
+// path and refused unless GitLab reports the same path, so a renamed or
+// mistyped namespace stops the session before any PAT exists. The earlier
+// format lists project IDs and scopes itself; only the paths are checked.
+func (g *GitLab) scopes(ctx context.Context) ([]Scope, error) {
+	if !g.Config.namespaced() {
+		paths := map[string]bool{}
+		for _, id := range g.Config.ProjectIDs {
+			var project struct {
+				Path string `json:"path_with_namespace"`
+			}
+			if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("projects/%d", id), &project); err != nil {
+				return nil, err
+			}
+			paths[project.Path] = true
+		}
+		if len(paths) != len(g.Config.Repositories) {
+			return nil, errors.New("GitLab project IDs do not match repository allowlist")
+		}
+		for _, repo := range g.Config.Repositories {
+			if !paths[repo] {
+				return nil, errors.New("GitLab project IDs do not match repository allowlist")
+			}
+		}
+		return g.Config.Scopes, nil
+	}
+	allowed := map[string]bool{}
+	var ids []string
+	for _, kind := range []struct {
+		model, endpoint string
+		paths           []string
+	}{{"Group", "groups/", g.Config.Groups}, {"Project", "projects/", g.Config.Projects}} {
+		for _, path := range kind.paths {
+			var resolved struct {
+				ID      int64  `json:"id"`
+				Group   string `json:"full_path"`
+				Project string `json:"path_with_namespace"`
+			}
+			if err := g.Issuer.rest(ctx, http.MethodGet, kind.endpoint+url.PathEscape(path), &resolved); err != nil {
+				return nil, err
+			}
+			reported := resolved.Group
+			if kind.model == "Project" {
+				reported = resolved.Project
+			}
+			if resolved.ID <= 0 || reported != path {
+				return nil, fmt.Errorf("GitLab %s %s resolves to another path; update the allowlist", strings.ToLower(kind.model), path)
+			}
+			id := fmt.Sprintf("gid://gitlab/%s/%d", kind.model, resolved.ID)
+			allowed[id] = true
+			ids = append(ids, id)
+		}
+	}
+	scopes := namespacedScopes(g.Config, ids)
+	if err := checkScopes(scopes, allowed, g.Config.PersonalProjects); err != nil {
+		return nil, err
+	}
+	return scopes, nil
+}
+
+// namespacedScopes grants read_user, to verify the user, and the permissions
+// on each resolved group and project and on personal projects when enabled.
+// A group covers its subgroups and their projects.
+func namespacedScopes(c GitLabConfig, resourceIDs []string) []Scope {
+	scopes := []Scope{{Access: "USER", Permissions: []string{"read_user"}}}
+	if len(resourceIDs) > 0 {
+		scopes = append(scopes, Scope{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: resourceIDs, Permissions: c.Permissions})
+	}
+	if c.PersonalProjects {
+		scopes = append(scopes, Scope{Access: "PERSONAL_PROJECTS", Permissions: c.Permissions})
+	}
+	return scopes
 }
 func (g *GitLab) revokeCreated(ctx context.Context) error {
 	for len(g.Created) > 0 {

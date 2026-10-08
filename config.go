@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -25,13 +26,18 @@ type GitHubConfig struct {
 	Repositories []string `json:"repositories"`
 }
 type GitLabConfig struct {
-	Enabled         *bool    `json:"enabled,omitempty"`
-	ExpectedUser    string   `json:"expected_user"`
-	Issuer          string   `json:"issuer,omitempty"`
-	IssuerTokenFile string   `json:"issuer_token_file,omitempty"`
-	Repositories    []string `json:"repositories"`
-	ProjectIDs      []int64  `json:"project_ids"`
-	Scopes          []Scope  `json:"granular_scopes"`
+	Enabled          *bool    `json:"enabled,omitempty"`
+	ExpectedUser     string   `json:"expected_user"`
+	Issuer           string   `json:"issuer,omitempty"`
+	IssuerTokenFile  string   `json:"issuer_token_file,omitempty"`
+	Groups           []string `json:"groups,omitempty"`
+	PersonalProjects bool     `json:"personal_projects,omitempty"`
+	Projects         []string `json:"projects,omitempty"`
+	Permissions      []string `json:"permissions,omitempty"`
+	// The earlier format: exact paths, their numeric IDs, and scopes by hand.
+	Repositories []string `json:"repositories,omitempty"`
+	ProjectIDs   []int64  `json:"project_ids,omitempty"`
+	Scopes       []Scope  `json:"granular_scopes,omitempty"`
 }
 type Config struct {
 	SessionHours float64      `json:"session_hours"`
@@ -39,6 +45,11 @@ type Config struct {
 	GitLab       GitLabConfig `json:"gitlab"`
 }
 
+// namespaced reports whether the GitLab allowlist names groups, personal
+// projects and project paths, whose IDs are resolved at session start.
+func (c GitLabConfig) namespaced() bool {
+	return len(c.Groups) > 0 || c.PersonalProjects || len(c.Projects) > 0 || len(c.Permissions) > 0
+}
 func enabled(value *bool) bool           { return value == nil || *value }
 func (c Config) duration() time.Duration { return time.Duration(c.SessionHours * float64(time.Hour)) }
 func expandPath(value, base string) (string, error) {
@@ -98,35 +109,16 @@ func (c Config) validate() error {
 	if !enabled(c.GitHub.Enabled) && !enabled(c.GitLab.Enabled) {
 		return errors.New("enable at least one provider")
 	}
-	for name, repos := range map[string][]string{"github": c.GitHub.Repositories, "gitlab": c.GitLab.Repositories} {
-		active := enabled(c.GitHub.Enabled)
-		if name == "gitlab" {
-			active = enabled(c.GitLab.Enabled)
+	if enabled(c.GitHub.Enabled) {
+		if len(c.GitHub.Repositories) == 0 {
+			return errors.New("configure an explicit github repository allowlist")
 		}
-		if !active {
-			continue
+		if err := validatePaths(c.GitHub.Repositories, true, true); err != nil {
+			return err
 		}
-		if len(repos) == 0 {
-			return fmt.Errorf("configure an explicit %s repository allowlist", name)
+		if c.GitHub.ClientID == "" || c.GitHub.ExpectedUser == "" || c.GitHub.StateFile == "" {
+			return errors.New("configure GitHub client_id, expected_user and state_file")
 		}
-		seen := map[string]bool{}
-		for _, repo := range repos {
-			normalized, ok := normalizeGitPath(repo)
-			if !ok || normalized != repo || !strings.Contains(repo, "/") || strings.Contains(repo, ":") {
-				return errors.New("repository paths must look like owner/repo or group/project")
-			}
-			key := repo
-			if name == "github" {
-				key = strings.ToLower(key)
-			}
-			if seen[key] {
-				return errors.New("duplicate repository in allowlist")
-			}
-			seen[key] = true
-		}
-	}
-	if enabled(c.GitHub.Enabled) && (c.GitHub.ClientID == "" || c.GitHub.ExpectedUser == "" || c.GitHub.StateFile == "") {
-		return errors.New("configure GitHub client_id, expected_user and state_file")
 	}
 	if enabled(c.GitLab.Enabled) {
 		if c.GitLab.ExpectedUser == "" {
@@ -144,12 +136,66 @@ func (c Config) validate() error {
 		default:
 			return errors.New(`GitLab issuer must be "glab" or omitted`)
 		}
-		if err := validateScopes(c.GitLab); err != nil {
+		if err := validateGitLabAllowlist(c.GitLab); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// validatePaths accepts canonical, distinct Git paths; a project needs a
+// namespace, a group may be top-level. GitHub compares them case-insensitively.
+func validatePaths(paths []string, project, fold bool) error {
+	seen := map[string]bool{}
+	for _, path := range paths {
+		normalized, ok := normalizeGitPath(path)
+		if !ok || normalized != path || strings.Contains(path, ":") || (project && !strings.Contains(path, "/")) {
+			if project {
+				return errors.New("repository paths must look like owner/repo or group/project")
+			}
+			return errors.New("GitLab groups must look like group or group/subgroup")
+		}
+		key := path
+		if fold {
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			return errors.New("duplicate path in allowlist")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+func validateGitLabAllowlist(c GitLabConfig) error {
+	if !c.namespaced() {
+		if len(c.Repositories) == 0 {
+			return errors.New("configure GitLab groups, personal_projects or projects")
+		}
+		if err := validatePaths(c.Repositories, true, false); err != nil {
+			return err
+		}
+		return validateScopes(c)
+	}
+	if len(c.Repositories) > 0 || len(c.ProjectIDs) > 0 || len(c.Scopes) > 0 {
+		return errors.New("GitLab groups, personal_projects, projects and permissions replace repositories, project_ids and granular_scopes: use one format")
+	}
+	if len(c.Groups) == 0 && !c.PersonalProjects && len(c.Projects) == 0 {
+		return errors.New("configure GitLab groups, personal_projects or projects")
+	}
+	if err := validatePaths(c.Groups, false, false); err != nil {
+		return err
+	}
+	if slices.Contains(c.Groups, c.ExpectedUser) {
+		return errors.New("your own namespace is not a group: use personal_projects")
+	}
+	if err := validatePaths(c.Projects, true, false); err != nil {
+		return err
+	}
+	return checkPermissions(c.Permissions)
+}
+
+// validateScopes checks the earlier format's hand-written scopes against its
+// project IDs.
 func validateScopes(c GitLabConfig) error {
 	allowed := map[string]bool{}
 	for _, id := range c.ProjectIDs {
@@ -165,11 +211,16 @@ func validateScopes(c GitLabConfig) error {
 	if len(allowed) == 0 || len(c.Scopes) == 0 {
 		return errors.New("configure GitLab project_ids and granular_scopes")
 	}
-	for _, scope := range c.Scopes {
-		if len(scope.Permissions) == 0 {
-			return errors.New("empty granular permission list")
-		}
-		if scope.Access == "USER" {
+	return checkScopes(c.Scopes, allowed, false)
+}
+
+// checkScopes refuses what a session PAT must never get: PAT management, USER
+// beyond read_user, resources outside allowed, and ALL_MEMBERSHIPS, INSTANCE or
+// (unless personal) PERSONAL_PROJECTS.
+func checkScopes(scopes []Scope, allowed map[string]bool, personal bool) error {
+	for _, scope := range scopes {
+		switch scope.Access {
+		case "USER":
 			if len(scope.ResourceIDs) != 0 {
 				return errors.New("USER scope cannot contain resourceIds")
 			}
@@ -178,20 +229,35 @@ func validateScopes(c GitLabConfig) error {
 					return errors.New("agent USER scope only allows read_user")
 				}
 			}
-		} else {
-			if scope.Access != "SELECTED_MEMBERSHIPS" || len(scope.ResourceIDs) == 0 {
-				return errors.New("agent scopes must use selected projects")
+		case "SELECTED_MEMBERSHIPS":
+			if len(scope.ResourceIDs) == 0 {
+				return errors.New("agent scopes must use selected groups or projects")
 			}
 			for _, id := range scope.ResourceIDs {
 				if !allowed[id] {
 					return errors.New("granular scope references an unconfigured project")
 				}
 			}
-		}
-		for _, p := range scope.Permissions {
-			if strings.Contains(p, "personal_access_token") {
-				return errors.New("agent cannot receive PAT management permissions")
+		case "PERSONAL_PROJECTS":
+			if !personal || len(scope.ResourceIDs) != 0 {
+				return errors.New("PERSONAL_PROJECTS needs personal_projects and no resourceIds")
 			}
+		default:
+			return errors.New("agent scopes must use selected groups or projects")
+		}
+		if err := checkPermissions(scope.Permissions); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func checkPermissions(permissions []string) error {
+	if len(permissions) == 0 {
+		return errors.New("empty granular permission list")
+	}
+	for _, p := range permissions {
+		if strings.Contains(p, "personal_access_token") {
+			return errors.New("agent cannot receive PAT management permissions")
 		}
 	}
 	return nil
