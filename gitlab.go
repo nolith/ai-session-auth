@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -113,6 +114,9 @@ func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 		command := exec.CommandContext(ctx, g.executable, args...)
 		// Outside any repository, so no remote can fill glab's placeholders.
 		command.Dir = "/"
+		// Its own process group: the SIGHUP of a closing terminal, or another
+		// Ctrl-C, must not cut a revocation short.
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		environment := environmentMap(os.Environ())
 		for _, key := range glabUnset {
 			delete(environment, key)

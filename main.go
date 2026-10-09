@@ -92,8 +92,18 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		return 2, errors.New("unknown command")
 	}
 }
+
+// sessionContext ends on Ctrl-C, SIGTERM, or SIGHUP from a closed terminal or
+// pane: each stops the harness, and the GitLab PAT is revoked before anything
+// is printed. SIGPIPE is caught, not ignored (the harness would inherit that),
+// so a write to a stdout or stderr that has gone away fails instead of killing
+// the launcher.
+func sessionContext() (context.Context, context.CancelFunc) {
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+}
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := sessionContext()
 	defer cancel()
 	code, err := execute(ctx, os.Args[1:], newAPI())
 	if err != nil {

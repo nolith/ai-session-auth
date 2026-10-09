@@ -34,7 +34,8 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
 - A Git credential helper that checks protocol, hostname, and repository path.
 - Temporary SSH-to-HTTPS URL rewriting through process-level Git configuration.
-- GitLab PAT revocation on normal exit, Ctrl-C/SIGTERM, or the session time limit.
+- GitLab PAT revocation on normal exit, Ctrl-C, SIGTERM, SIGHUP (a closed
+  terminal or pane), or the session time limit.
 - Atomic GitHub state updates, private secret files, and locking across sessions.
 - No tokens in normal launcher output, command-line arguments, or Git URLs.
 
@@ -238,12 +239,16 @@ up to midnight UTC at or after the planned end of the session:
 | 24 hours | At least 24 and less than 48 hours |
 | 48 hours | At least 48 and less than 72 hours |
 
-Rounding prevents the token from expiring before the session ends.
-Normally, the PAT is revoked when the harness exits. If the computer shuts down,
-the launcher receives SIGKILL, or revocation fails because of a network error,
-the PAT expires on its configured date. At the session limit, the broker stops
-issuing credentials and the launcher terminates the harness process group.
-Processes that deliberately detach from that group are not guaranteed to stop.
+Rounding prevents the token from expiring before the session ends. Normally,
+the PAT is revoked when the harness exits. Ctrl-C, SIGTERM and the SIGHUP of a
+closed terminal or pane stop the harness process group and revoke it too; the
+launcher revokes before printing anything, survives an output that has gone
+away, and runs glab in its own process group so that the hangup cannot
+interrupt a revocation. If the computer shuts down, the launcher receives
+SIGKILL, or revocation fails because of a network error, the PAT expires on its
+configured date. At the session limit, the broker stops issuing credentials and
+the launcher terminates the harness process group. Processes that deliberately
+detach from that group are not guaranteed to stop.
 
 GitHub access tokens last eight hours, with rotating refresh tokens stored in
 persistent state. Concurrent sessions for the same App and user share the
@@ -301,9 +306,10 @@ go vet ./...
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
 fake `glab` (arguments, environment, locking, silent failures), group and
-project resolution, scope building, namespace and repository allowlists, the Git credential protocol, URL rewriting
-with real Git, UNIX socket RPC, exit codes, process-group timeouts, and
-cancellable issuer input.
+project resolution, scope building, namespace and repository allowlists, the
+Git credential protocol, URL rewriting with real Git, UNIX socket RPC, exit
+codes, process-group timeouts, revocation after SIGHUP with the output gone,
+and cancellable issuer input.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
 with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.

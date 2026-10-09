@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -223,5 +225,88 @@ func TestBrokerGitLabNamespaces(t *testing.T) {
 	b.Config.GitLab.PersonalProjects = false
 	if r, _ := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "gitlab.com", Path: "alice/dotfiles", Protocol: "https"}); r.Token != "" {
 		t.Fatal("personal project allowed without personal_projects")
+	}
+}
+
+// TestMain lets a test re-execute this binary as the launcher itself, with
+// main's own signal handling, by passing its arguments as JSON.
+func TestMain(m *testing.M) {
+	if raw, ok := os.LookupEnv("AGENT_AUTH_TEST_ARGS"); ok {
+		var args []string
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			os.Exit(2)
+		}
+		os.Args = append([]string{"agent-auth"}, args...)
+		main()
+	}
+	os.Exit(m.Run())
+}
+
+// A closed terminal or pane takes the launcher's output with it, then sends
+// SIGHUP: the harness must still be stopped and the session PAT revoked.
+func TestHangupStopsHarnessAndRevokes(t *testing.T) {
+	glab := fakeGlab(t)
+	dir := t.TempDir()
+	c := Config{SessionHours: 1, GitHub: GitHubConfig{Enabled: boolPointer(false)}, GitLab: glabConfig()}
+	raw, _ := json.Marshal(c)
+	config := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(config, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(dir, "harness.pid")
+	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; exec sleep 30"})
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir())
+	launcher.Stdout, launcher.Stderr = write, write
+	if err = launcher.Start(); err != nil {
+		t.Fatal(err)
+	}
+	write.Close()
+	done := make(chan error, 1)
+	go func() { done <- launcher.Wait() }()
+	deadline := time.After(20 * time.Second)
+	for {
+		if raw, err := os.ReadFile(started); err == nil && strings.HasSuffix(string(raw), "\n") {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				// Only matters if the launcher failed to stop it.
+				t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+			}
+			break
+		}
+		select {
+		case err := <-done:
+			output, _ := io.ReadAll(read)
+			if strings.Contains(string(output), "UNIX socket") {
+				t.Skip("runtime prohibits UNIX sockets")
+			}
+			t.Fatalf("launcher exited before the harness started: %v %s", err, output)
+		case <-deadline:
+			launcher.Process.Kill()
+			t.Fatal("harness did not start")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	read.Close()
+	if err = launcher.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-done:
+	case <-time.After(20 * time.Second):
+		launcher.Process.Kill()
+		t.Fatal("launcher did not stop after SIGHUP")
+	}
+	// 130 is a handled interruption; a launcher killed by SIGHUP or SIGPIPE
+	// reports -1.
+	if code := launcher.ProcessState.ExitCode(); code != 130 {
+		t.Fatalf("exit %d (%v)", code, err)
+	}
+	calls := fakeGlabCalls(t, glab)
+	if len(calls) == 0 || !slices.Equal(calls[len(calls)-1][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
+		t.Fatalf("session PAT not revoked: %q", calls)
 	}
 }

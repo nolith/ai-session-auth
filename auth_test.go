@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -277,6 +278,7 @@ echo "$n" >"$log/count"
 printf '%s\0' "$@" >"$log/args.$n"
 env >"$log/env.$n"
 pwd >"$log/cwd.$n"
+ps -o pgid= -p $$ | tr -d ' ' >"$log/pgid.$n"
 if [ -n "${FAKE_GLAB_FAIL-}" ]; then
 	echo 'glab-secret on stdout'
 	echo 'glab-secret on stderr' >&2
@@ -400,6 +402,10 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 		cwd, _ := os.ReadFile(filepath.Join(dir, "cwd."+strconv.Itoa(n)))
 		if strings.TrimSpace(string(cwd)) != "/" {
 			t.Errorf("call %d ran in %q", n, cwd)
+		}
+		pgid, _ := os.ReadFile(filepath.Join(dir, "pgid."+strconv.Itoa(n)))
+		if group, err := strconv.Atoi(strings.TrimSpace(string(pgid))); err != nil || group == syscall.Getpgrp() {
+			t.Errorf("call %d shares the launcher's process group: %q %v", n, pgid, err)
 		}
 	}
 	info, err := os.Stat(filepath.Join(state, "ai-session-auth", "glab.lock"))
