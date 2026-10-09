@@ -293,11 +293,15 @@ repositories accessible to the App: `github.repositories` restricts Git
 credential delivery and does not further narrow the token's API access.
 Install the App only on the required repositories.
 
-The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`.
-A container without the socket mounted, or a shell that clears these variables,
-requires additional configuration. Calling `/usr/bin/gh` directly bypasses
-the wrapper. CLI configuration directories are temporary; personal aliases,
-extensions, and preferences are not copied automatically.
+The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`. A
+container without the socket mounted, or a shell that clears these variables,
+requires additional configuration. Calling `/usr/bin/gh` directly bypasses the
+wrapper. The real `gh` and `glab` run with the session's wrapper directory
+removed from `PATH`, so a version-manager shim, such as mise's, recorded as the
+real CLI and running the next one on `PATH` cannot loop back to the wrapper. A
+shim that calls the wrapper by its path fails with a "wrapper loop" error
+instead of spinning. CLI configuration directories are temporary; personal
+aliases, extensions, and preferences are not copied automatically.
 
 URL rewriting supports `git@github.com:owner/repo.git`,
 `ssh://git@github.com/...`, and their GitLab.com equivalents. SSH aliases and
@@ -323,10 +327,10 @@ Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
 fake `glab` (arguments, environment, locking, silent failures), group and
 project resolution, scope building, namespace and repository allowlists, the
-Git credential protocol, URL rewriting with real Git, UNIX socket RPC, exit
-codes, process-group timeouts, revocation after SIGHUP with the output gone,
-the reaper after SIGKILL and its silence after a clean exit, and cancellable
-issuer input.
+Git credential protocol, PATH shims and the wrapper loop guard, URL rewriting
+with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
+after SIGHUP with the output gone, the reaper after SIGKILL and its silence
+after a clean exit, and cancellable issuer input.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
 with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.

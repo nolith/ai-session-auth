@@ -229,8 +229,8 @@ func TestBrokerGitLabNamespaces(t *testing.T) {
 }
 
 // TestMain lets a test re-execute this binary as the launcher itself, with
-// main's own signal handling, by passing its arguments as JSON. The launcher's
-// reaper re-executes it too, as "_reaper".
+// main's own signal handling, by passing its arguments as JSON. The launcher
+// re-executes it too, as "_reaper" or "_proxy".
 func TestMain(m *testing.M) {
 	if raw, ok := os.LookupEnv("AGENT_AUTH_TEST_ARGS"); ok {
 		os.Unsetenv("AGENT_AUTH_TEST_ARGS")
@@ -241,7 +241,8 @@ func TestMain(m *testing.M) {
 		os.Args = append([]string{"agent-auth"}, args...)
 		main()
 	}
-	if len(os.Args) > 1 && os.Args[1] == "_reaper" {
+	// The launcher's own re-executions: the reaper, and gh/glab through _proxy.
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "_") {
 		main()
 	}
 	os.Exit(m.Run())
@@ -433,5 +434,107 @@ func TestKilledLauncherIsReaped(t *testing.T) {
 	log, err := os.ReadFile(filepath.Join(s.state, "ai-session-auth", "reaper.log"))
 	if err != nil || !strings.Contains(string(log), "launcher gone without revoking; revoked") {
 		t.Fatalf("reaper log: %q %v", log, err)
+	}
+}
+
+// shimSession runs `glab api --method GET user` through the session's glab
+// wrapper, with lookup recording shim as the real glab, as mise's shim is when
+// it is first on PATH. PATH is the wrappers, then the shim's directory, then a
+// fake glab.
+func shimSession(t *testing.T, shim string) (string, string, error) {
+	t.Helper()
+	real := fakeGlab(t)
+	shims := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shims, "glab"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Keep socket paths below the macOS UNIX-domain path length limit.
+	dir, err := os.MkdirTemp("/tmp", "auth-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	address := filepath.Join(dir, "broker.sock")
+	now := time.Now()
+	server, err := startBroker(context.Background(), address, &Broker{Config: testConfig(), Now: time.Now, Deadline: now.Add(time.Hour), GitLabToken: "session-secret"})
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		t.Skip("runtime prohibits UNIX sockets")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.close)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := append(os.Environ(), "PATH="+shims+string(os.PathListSeparator)+real+string(os.PathListSeparator)+os.Getenv("PATH"))
+	values, err := sessionEnvironment(testConfig(), dir, address, binary, base, func(cli string) (string, error) { return filepath.Join(shims, cli), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Every hop of a loop execs in place, so killing the one process ends it.
+	command := exec.CommandContext(ctx, filepath.Join(dir, "bin", "glab"), "api", "--method", "GET", "user")
+	command.Env = values
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if ctx.Err() != nil {
+		t.Fatalf("glab did not terminate: %s", stderr.String())
+	}
+	return real, string(output) + stderr.String(), err
+}
+
+// mise with an inactive glab runs the next glab on PATH, skipping its own
+// directory: inside a session, that used to be the wrapper again.
+func TestProxyShimReachesRealCLI(t *testing.T) {
+	real, output, err := shimSession(t, `#!/bin/sh
+self=$(cd "$(dirname "$0")" && pwd)
+IFS=:
+for dir in $PATH; do
+	[ "$dir" = "$self" ] && continue
+	[ -x "$dir/glab" ] && exec "$dir/glab" "$@"
+done
+exit 127
+`)
+	if err != nil || strings.TrimSpace(output) != `{"username":"alice"}` {
+		t.Fatalf("%v: %s", err, output)
+	}
+	calls := fakeGlabCalls(t, real)
+	if len(calls) != 1 {
+		t.Fatalf("real glab called %d times", len(calls))
+	}
+	env, _ := os.ReadFile(filepath.Join(real, "env.1"))
+	for _, want := range []string{"\nGITLAB_TOKEN=session-secret\n", "\n" + proxyMark + "=gitlab\n"} {
+		if !strings.Contains("\n"+string(env), want) {
+			t.Errorf("real glab environment lacks %q", strings.TrimSpace(want))
+		}
+	}
+}
+
+// A shim that calls the wrapper by its path cannot be fixed through PATH; the
+// guard stops it at the second entry instead of spinning.
+func TestProxyLoopFailsFast(t *testing.T) {
+	_, output, err := shimSession(t, `#!/bin/sh
+exec "$(dirname "$AI_AUTH_SOCKET")/bin/glab" "$@"
+`)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(output, "glab wrapper loop") {
+		t.Fatalf("%v: %s", err, output)
+	}
+}
+func TestPathWithout(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	os.Mkdir(bin, 0700)
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(bin, link); err != nil {
+		t.Fatal(err)
+	}
+	value := strings.Join([]string{bin, "/usr/bin", bin + "/", link, "", "/bin"}, string(os.PathListSeparator))
+	if got, want := pathWithout(value, bin), strings.Join([]string{"/usr/bin", "", "/bin"}, string(os.PathListSeparator)); got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }

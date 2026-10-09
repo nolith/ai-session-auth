@@ -63,6 +63,8 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 	for _, key := range inheritedCredentials {
 		delete(env, key)
 	}
+	// A session started from inside another session's gh or glab is not a loop.
+	delete(env, proxyMark)
 	bin := filepath.Join(directory, "bin")
 	if err := os.Mkdir(bin, 0700); err != nil {
 		return nil, err
@@ -123,9 +125,33 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 	}
 	return environmentList(env), nil
 }
+
+// proxyMark is set for the real CLI and everything it starts. Entering the
+// proxy again for the same service means the CLI led back to its wrapper.
+const proxyMark = "AI_AUTH_PROXY"
+
+// pathWithout drops dir from a PATH value, however the entry spells it.
+func pathWithout(value, dir string) string {
+	target, targetErr := os.Stat(dir)
+	var kept []string
+	for _, entry := range filepath.SplitList(value) {
+		if entry != "" && filepath.Clean(entry) == filepath.Clean(dir) {
+			continue
+		}
+		if info, err := os.Stat(entry); entry != "" && targetErr == nil && err == nil && os.SameFile(info, target) {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
+}
 func proxyCLI(service, executable string, args []string) error {
-	if service != "github" && service != "gitlab" {
+	cli := map[string]string{"github": "gh", "gitlab": "glab"}[service]
+	if cli == "" {
 		return errors.New("invalid provider")
+	}
+	if os.Getenv(proxyMark) == service {
+		return fmt.Errorf("%s wrapper loop: %s leads back to the session wrapper; check PATH shims for %s, such as mise", cli, executable, cli)
 	}
 	response, err := rpc(BrokerRequest{Service: service})
 	if err != nil {
@@ -140,6 +166,10 @@ func proxyCLI(service, executable string, args []string) error {
 		key = "GITLAB_TOKEN"
 	}
 	environment[key] = response.Token
+	environment[proxyMark] = service
+	// The recorded CLI may be a shim, such as mise's, that runs the next one on
+	// PATH: without the wrappers there, that is never the wrapper again.
+	environment["PATH"] = pathWithout(environment["PATH"], filepath.Join(filepath.Dir(os.Getenv("AI_AUTH_SOCKET")), "bin"))
 	return syscall.Exec(executable, append([]string{executable}, args...), environmentList(environment))
 }
 func credentialWith(operation string, input io.Reader, output io.Writer, request func(BrokerRequest) (BrokerResponse, error)) error {
