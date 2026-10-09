@@ -29,6 +29,9 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		}
 		return 1, proxyCLI(args[1], args[2], args[3:])
 	}
+	if len(args) > 0 && args[0] == "_reaper" {
+		return 0, runReaper(ctx, args[1:])
+	}
 	if len(args) > 0 && args[0] == "_credential" {
 		operation := "get"
 		if len(args) > 1 {

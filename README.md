@@ -35,7 +35,8 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - A Git credential helper that checks protocol, hostname, and repository path.
 - Temporary SSH-to-HTTPS URL rewriting through process-level Git configuration.
 - GitLab PAT revocation on normal exit, Ctrl-C, SIGTERM, SIGHUP (a closed
-  terminal or pane), or the session time limit.
+  terminal or pane), or the session time limit, and by a detached reaper when
+  the launcher is killed outright.
 - Atomic GitHub state updates, private secret files, and locking across sessions.
 - No tokens in normal launcher output, command-line arguments, or Git URLs.
 
@@ -244,11 +245,26 @@ the PAT is revoked when the harness exits. Ctrl-C, SIGTERM and the SIGHUP of a
 closed terminal or pane stop the harness process group and revoke it too; the
 launcher revokes before printing anything, survives an output that has gone
 away, and runs glab in its own process group so that the hangup cannot
-interrupt a revocation. If the computer shuts down, the launcher receives
-SIGKILL, or revocation fails because of a network error, the PAT expires on its
-configured date. At the session limit, the broker stops issuing credentials and
-the launcher terminates the harness process group. Processes that deliberately
-detach from that group are not guaranteed to stop.
+interrupt a revocation.
+
+Some terminals do not wait: closing a herdr pane follows SIGHUP and SIGTERM
+with SIGKILL about half a second later. After minting, the launcher therefore
+starts a reaper (`agent-auth _reaper`) in a new session, detached twice so
+that it is outside the pane's process tree. It receives only the configuration
+path and the PAT's name and ID, and waits on a pipe whose write end only the
+launcher holds. After a clean revocation the launcher tells it so, and the
+reaper exits. If the pipe closes otherwise, because the launcher died by any
+signal or its own revocation failed, the reaper checks that the ID still names
+the session PAT, revokes it through the issuer, retries after 10 seconds and a
+minute if needed, and logs what it did to
+`$XDG_STATE_HOME/ai-session-auth/reaper.log`
+(`~/.local/state/ai-session-auth/reaper.log` by default), never to a terminal.
+
+If the computer shuts down, both processes are killed, or revocation keeps
+failing because of a network error, the PAT expires on its configured date.
+At the session limit, the broker stops issuing credentials and the launcher
+terminates the harness process group. Processes that deliberately detach from
+that group are not guaranteed to stop.
 
 GitHub access tokens last eight hours, with rotating refresh tokens stored in
 persistent state. Concurrent sessions for the same App and user share the
@@ -309,7 +325,8 @@ fake `glab` (arguments, environment, locking, silent failures), group and
 project resolution, scope building, namespace and repository allowlists, the
 Git credential protocol, URL rewriting with real Git, UNIX socket RPC, exit
 codes, process-group timeouts, revocation after SIGHUP with the output gone,
-and cancellable issuer input.
+the reaper after SIGKILL and its silence after a clean exit, and cancellable
+issuer input.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
 with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.

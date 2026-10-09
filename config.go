@@ -43,6 +43,7 @@ type Config struct {
 	SessionHours float64      `json:"session_hours"`
 	GitHub       GitHubConfig `json:"github"`
 	GitLab       GitLabConfig `json:"gitlab"`
+	source       string       // absolute path, for the reaper to load it again
 }
 
 // namespaced reports whether the GitLab allowlist names groups, personal
@@ -87,6 +88,7 @@ func loadConfig(path string) (Config, error) {
 	if err != nil {
 		return config, err
 	}
+	config.source = absolute
 	base := filepath.Dir(absolute)
 	if enabled(config.GitHub.Enabled) {
 		config.GitHub.StateFile, err = expandPath(config.GitHub.StateFile, base)

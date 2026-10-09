@@ -284,19 +284,29 @@ if [ -n "${FAKE_GLAB_FAIL-}" ]; then
 	echo 'glab-secret on stderr' >&2
 	exit 1
 fi
-for last; do :; done
-case $last in
-user) echo '{"username":"alice"}' ;;
-projects/42) echo '{"path_with_namespace":"group/project"}' ;;
-input=*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
-'personal_access_tokens?'*)
+method=
+for last; do
+	[ "${previous-}" = --method ] && method=$last
+	previous=$last
+done
+case "$method $last" in
+"GET user") echo '{"username":"alice"}' ;;
+"GET projects/42") echo '{"path_with_namespace":"group/project"}' ;;
+" input="*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
+"GET personal_access_tokens?"*)
 	name=${last##*search=}
 	name=${name%%&*}
+	printf '%s' "$name" >"$log/name"
 	printf '[{"id":99,"name":"%s-other"},{"id":42,"name":"%s"}]\n' "$name" "$name"
 	;;
-personal_access_tokens/42) ;;
+"GET personal_access_tokens/42")
+	active=true
+	[ -e "$log/revoked" ] && active=false
+	printf '{"id":42,"name":"%s","active":%s}\n' "$(cat "$log/name")" "$active"
+	;;
+"DELETE personal_access_tokens/42") touch "$log/revoked" ;;
 *)
-	echo "unexpected $last" >&2
+	echo "unexpected $method $last" >&2
 	exit 1
 	;;
 esac
@@ -539,6 +549,8 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 			}
 			scopes = payload.Variables.Input.Scopes
 			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
+		case r.URL.Path == "/api/v4/personal_access_tokens":
+			return 200, []map[string]any{{"id": 1, "name": r.URL.Query().Get("search")}}
 		}
 		// Subgroup and project paths must travel as one escaped segment.
 		lookups = append(lookups, r.URL.EscapedPath())
@@ -613,4 +625,30 @@ func must[T any](value T, err error) T {
 		panic(err)
 	}
 	return value
+}
+func TestRevokeCheckedLeavesOtherTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current map[string]any
+		revoked bool
+		fails   bool
+	}{
+		{"active", map[string]any{"name": "ai-session-x", "active": true}, true, false},
+		{"already revoked", map[string]any{"name": "ai-session-x", "active": false}, false, false},
+		{"another token", map[string]any{"name": "someone-else", "active": true}, false, true},
+	} {
+		deleted := false
+		api := mockAPI(t, func(r *http.Request) (int, any) {
+			if r.Method == http.MethodDelete {
+				deleted = true
+				return 204, nil
+			}
+			return 200, tc.current
+		})
+		g := &GitLab{Issuer: bearerIssuer{api: api, token: "issuer"}}
+		revoked, err := g.revokeChecked(context.Background(), sessionPAT{Name: "ai-session-x", ID: 42})
+		if revoked != tc.revoked || deleted != tc.revoked || (err != nil) != tc.fails {
+			t.Errorf("%s: revoked %v, deleted %v, err %v", tc.name, revoked, deleted, err)
+		}
+	}
 }

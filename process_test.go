@@ -229,9 +229,11 @@ func TestBrokerGitLabNamespaces(t *testing.T) {
 }
 
 // TestMain lets a test re-execute this binary as the launcher itself, with
-// main's own signal handling, by passing its arguments as JSON.
+// main's own signal handling, by passing its arguments as JSON. The launcher's
+// reaper re-executes it too, as "_reaper".
 func TestMain(m *testing.M) {
 	if raw, ok := os.LookupEnv("AGENT_AUTH_TEST_ARGS"); ok {
+		os.Unsetenv("AGENT_AUTH_TEST_ARGS")
 		var args []string
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
 			os.Exit(2)
@@ -239,13 +241,25 @@ func TestMain(m *testing.M) {
 		os.Args = append([]string{"agent-auth"}, args...)
 		main()
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_reaper" {
+		main()
+	}
 	os.Exit(m.Run())
 }
 
-// A closed terminal or pane takes the launcher's output with it, then sends
-// SIGHUP: the harness must still be stopped and the session PAT revoked.
-func TestHangupStopsHarnessAndRevokes(t *testing.T) {
-	glab := fakeGlab(t)
+type testSession struct {
+	launcher *exec.Cmd
+	done     chan error
+	output   *os.File // read end of the launcher's stdout and stderr
+	glab     string   // fake glab directory and call log
+	state    string   // XDG_STATE_HOME: glab.lock and reaper.log
+}
+
+// startSession runs the launcher with a fake glab issuer around the harness
+// script, which runs under /bin/sh, and returns once the harness has started.
+func startSession(t *testing.T, script string) *testSession {
+	t.Helper()
+	s := &testSession{glab: fakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
 	c := Config{SessionHours: 1, GitHub: GitHubConfig{Enabled: boolPointer(false)}, GitLab: glabConfig()}
 	raw, _ := json.Marshal(c)
@@ -254,59 +268,170 @@ func TestHangupStopsHarnessAndRevokes(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := filepath.Join(dir, "harness.pid")
-	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; exec sleep 30"})
+	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; " + script})
 	read, write, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	launcher := exec.Command(os.Args[0])
-	launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir())
-	launcher.Stdout, launcher.Stderr = write, write
-	if err = launcher.Start(); err != nil {
+	s.output = read
+	s.launcher = exec.Command(os.Args[0])
+	s.launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
+	s.launcher.Stdout, s.launcher.Stderr = write, write
+	if err = s.launcher.Start(); err != nil {
 		t.Fatal(err)
 	}
 	write.Close()
-	done := make(chan error, 1)
-	go func() { done <- launcher.Wait() }()
+	exited := make(chan error, 1)
+	go func() { exited <- s.launcher.Wait() }()
+	// Wait for the reaper too, so that the temporary directories outlive it.
+	t.Cleanup(func() { waitReaper(t, s) })
 	deadline := time.After(20 * time.Second)
 	for {
 		if raw, err := os.ReadFile(started); err == nil && strings.HasSuffix(string(raw), "\n") {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
-				// Only matters if the launcher failed to stop it.
+				// Only matters if nothing else stops it.
 				t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
 			}
-			break
+			go func() { s.done <- <-exited }()
+			return s
 		}
 		select {
-		case err := <-done:
+		case err := <-exited:
+			// A harness that exits at once may finish before it is seen.
+			if raw, _ := os.ReadFile(started); len(raw) > 0 {
+				s.done <- err
+				return s
+			}
 			output, _ := io.ReadAll(read)
 			if strings.Contains(string(output), "UNIX socket") {
 				t.Skip("runtime prohibits UNIX sockets")
 			}
 			t.Fatalf("launcher exited before the harness started: %v %s", err, output)
 		case <-deadline:
-			launcher.Process.Kill()
+			s.launcher.Process.Kill()
 			t.Fatal("harness did not start")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	read.Close()
-	if err = launcher.Process.Signal(syscall.SIGHUP); err != nil {
+}
+func (s *testSession) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(20 * time.Second):
+		s.launcher.Process.Kill()
+		t.Fatal("launcher did not stop")
+	}
+}
+
+// reaperPID finds this session's reaper by the PAT name on its command line.
+func reaperPID(t *testing.T, s *testSession) int {
+	t.Helper()
+	name, err := os.ReadFile(filepath.Join(s.glab, "name"))
+	if err != nil || len(name) == 0 {
+		return 0
+	}
+	output, err := exec.Command("ps", "-A", "-o", "pid=,args=").Output()
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err = <-done:
-	case <-time.After(20 * time.Second):
-		launcher.Process.Kill()
-		t.Fatal("launcher did not stop after SIGHUP")
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, "_reaper watch ") && strings.Contains(line, string(name)) {
+			pid, _ := strconv.Atoi(strings.Fields(line)[0])
+			return pid
+		}
 	}
+	return 0
+}
+func waitReaper(t *testing.T, s *testSession) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); reaperPID(t, s) != 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			syscall.Kill(reaperPID(t, s), syscall.SIGKILL)
+			t.Fatal("reaper still running")
+		}
+	}
+}
+func deletes(t *testing.T, s *testSession) (count int, checked bool) {
+	t.Helper()
+	for _, call := range fakeGlabCalls(t, s.glab) {
+		switch {
+		case slices.Equal(call[3:], []string{"--method", "DELETE", "personal_access_tokens/42"}):
+			count++
+		case slices.Equal(call[3:], []string{"--method", "GET", "personal_access_tokens/42"}):
+			checked = true
+		}
+	}
+	return count, checked
+}
+
+// A closed terminal or pane takes the launcher's output with it, then sends
+// SIGHUP: the harness must still be stopped and the session PAT revoked.
+func TestHangupStopsHarnessAndRevokes(t *testing.T) {
+	s := startSession(t, "exec sleep 30")
+	s.output.Close()
+	if err := s.launcher.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	s.wait(t)
 	// 130 is a handled interruption; a launcher killed by SIGHUP or SIGPIPE
 	// reports -1.
-	if code := launcher.ProcessState.ExitCode(); code != 130 {
-		t.Fatalf("exit %d (%v)", code, err)
+	if code := s.launcher.ProcessState.ExitCode(); code != 130 {
+		t.Fatalf("exit %d", code)
 	}
-	calls := fakeGlabCalls(t, glab)
-	if len(calls) == 0 || !slices.Equal(calls[len(calls)-1][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
-		t.Fatalf("session PAT not revoked: %q", calls)
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+}
+
+// The launcher revokes on a clean exit and tells the reaper, which does nothing.
+func TestCleanExitRevokesOnce(t *testing.T) {
+	s := startSession(t, "exit 0")
+	io.Copy(io.Discard, s.output)
+	s.wait(t)
+	if code := s.launcher.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+	if _, err := os.Stat(filepath.Join(s.state, "ai-session-auth", "reaper.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reaper logged on a clean exit: %v", err)
+	}
+}
+
+// SIGKILL, as from a herdr pane that closes, leaves no chance to revoke: the
+// reaper, outside the launcher's session and process tree, must do it.
+func TestKilledLauncherIsReaped(t *testing.T) {
+	s := startSession(t, "exec sleep 30")
+	var reaper int
+	for deadline := time.Now().Add(10 * time.Second); reaper == 0; time.Sleep(20 * time.Millisecond) {
+		if reaper = reaperPID(t, s); reaper == 0 && time.Now().After(deadline) {
+			t.Fatal("no reaper")
+		}
+	}
+	launcher := s.launcher.Process.Pid
+	reaperSession, _ := syscall.Getsid(reaper)
+	launcherSession, _ := syscall.Getsid(launcher)
+	reaperGroup, _ := syscall.Getpgid(reaper)
+	parent, _ := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(reaper)).Output()
+	if reaperSession == launcherSession || reaperGroup == syscall.Getpgrp() || strings.TrimSpace(string(parent)) == strconv.Itoa(launcher) {
+		t.Fatalf("reaper not detached: session %d (launcher %d), group %d, parent %s", reaperSession, launcherSession, reaperGroup, parent)
+	}
+	if err := s.launcher.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	s.wait(t)
+	// The harness survives SIGKILL of the launcher; holding no end of the
+	// reaper's pipe, it cannot delay the revocation either.
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || !checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+	log, err := os.ReadFile(filepath.Join(s.state, "ai-session-auth", "reaper.log"))
+	if err != nil || !strings.Contains(string(log), "launcher gone without revoking; revoked") {
+		t.Fatalf("reaper log: %q %v", log, err)
 	}
 }

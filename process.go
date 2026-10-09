@@ -54,9 +54,13 @@ func appendGitConfig(env map[string]string, entries [][2]string) error {
 	env["GIT_CONFIG_COUNT"] = strconv.Itoa(count)
 	return nil
 }
+
+// inheritedCredentials never reach the harness or the reaper.
+var inheritedCredentials = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
+
 func sessionEnvironment(config Config, directory, address, binary string, base []string, lookup func(string) (string, error)) ([]string, error) {
 	env := environmentMap(base)
-	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"} {
+	for _, key := range inheritedCredentials {
 		delete(env, key)
 	}
 	bin := filepath.Join(directory, "bin")

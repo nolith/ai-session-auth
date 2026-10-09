@@ -139,18 +139,30 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 			return 1, err
 		}
 	}
+	// The reaper's pipe: closed without "revoked", it revokes the PAT itself.
+	var reaper *os.File
 	if gitlab != nil {
 		defer func() {
+			if reaper != nil {
+				defer reaper.Close()
+			}
 			if len(gitlab.Created) == 0 {
 				return
 			}
 			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := gitlab.revokeCreated(cleanup); err != nil {
-				fmt.Fprintln(output, "WARNING: GitLab revocation failed; the PAT will expire at its configured UTC date.")
-			} else {
-				fmt.Fprintln(output, "GitLab session PAT revoked.")
+				if reaper != nil {
+					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the reaper retries it, see "+reaperLogPath()+".")
+				} else {
+					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the PAT will expire at its configured UTC date.")
+				}
+				return
 			}
+			if reaper != nil {
+				reaper.WriteString(reaperDone)
+			}
+			fmt.Fprintln(output, "GitLab session PAT revoked.")
 		}()
 	}
 	broker := &Broker{Config: config, Deadline: time.Now().Add(config.duration()), Now: time.Now}
@@ -170,6 +182,9 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 		broker.GitLabToken = token
 		broker.mu.Unlock()
 		if err != nil {
+			return 1, err
+		}
+		if reaper, err = startReaper(binary, config.source, gitlab.Created[0]); err != nil {
 			return 1, err
 		}
 	}
