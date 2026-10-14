@@ -12,6 +12,15 @@ go build -o agent-auth .
 
 The compiled binary does not require a Go runtime.
 
+With Nix, build or run it from the flake, or enter a shell with Go, `gh`,
+`glab`, and the formatter:
+
+```bash
+nix build            # ./result/bin/agent-auth
+nix run . -- --help
+nix develop
+```
+
 Start an AI harness with API and Git HTTPS access under your own identity:
 
 ```bash
@@ -321,6 +330,9 @@ credentials, may require another device authorization.
 ```bash
 go test -race ./...
 go vet ./...
+nix fmt              # gofmt and nixfmt through treefmt
+treefmt              # the same, from treefmt.toml (inside nix develop)
+nix flake check      # formatting, vet, race-enabled tests and the build
 ```
 
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
@@ -332,8 +344,9 @@ with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
 after SIGHUP with the output gone, the reaper after SIGKILL and its silence
 after a clean exit, and cancellable issuer input.
 Provider APIs are simulated; tests do not use real credentials.
-CI runs formatting, vet, race-enabled tests, and builds on Linux and macOS
-with stable Go. All 15 tests passed on both platforms, including UNIX socket RPC.
+CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:
+formatting, vet, race-enabled tests, and the build. All 15 tests passed on
+both platforms, including UNIX socket RPC.
 
 The environment used to build the initial implementation prohibits UNIX socket
 creation, so the socket test is skipped there on EPERM/EACCES. The launcher
