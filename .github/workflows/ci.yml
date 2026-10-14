@@ -1,23 +1,20 @@
-name: Go checks
+name: CI
 on:
   push:
   pull_request:
 permissions:
   contents: read
 jobs:
-  test:
+  check:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-          cache: false
-      - name: Format
-        run: test -z "$(gofmt -l *.go)"
-      - run: go vet ./...
-      - run: go test -race -count=1 -v ./...
-      - run: go build -o agent-auth .
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      # Formatting, go vet, race-enabled tests and the build.
+      - run: nix flake check -L
+      - run: nix build -L
+      - run: ./result/bin/agent-auth --help
