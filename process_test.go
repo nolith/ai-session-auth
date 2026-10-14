@@ -414,8 +414,8 @@ func TestKilledLauncherIsReaped(t *testing.T) {
 		}
 	}
 	launcher := s.launcher.Process.Pid
-	reaperSession, _ := syscall.Getsid(reaper)
-	launcherSession, _ := syscall.Getsid(launcher)
+	reaperSession, _ := getsid(reaper)
+	launcherSession, _ := getsid(launcher)
 	reaperGroup, _ := syscall.Getpgid(reaper)
 	parent, _ := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(reaper)).Output()
 	if reaperSession == launcherSession || reaperGroup == syscall.Getpgrp() || strings.TrimSpace(string(parent)) == strconv.Itoa(launcher) {
