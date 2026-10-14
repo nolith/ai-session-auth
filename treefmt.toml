@@ -1,0 +1,12 @@
+# Used by plain `treefmt` and by `nix fmt` (via treefmt.withConfig in flake.nix).
+on-unmatched = "info"
+tree-root-file = "flake.nix"
+
+[formatter.gofmt]
+command = "gofmt"
+options = ["-w"]
+includes = ["*.go"]
+
+[formatter.nixfmt]
+command = "nixfmt"
+includes = ["*.nix"]

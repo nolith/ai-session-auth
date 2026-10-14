@@ -1,4 +1,6 @@
 /agent-auth
 /config.json
 /dist/
+/result*
 *.lock
+!/flake.lock
