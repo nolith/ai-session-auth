@@ -74,6 +74,23 @@ func TestConfigRejectsBroaderScopeAndMissingPaths(t *testing.T) {
 	if _, err := loadConfig(path); err == nil {
 		t.Fatal("accepted trailing JSON")
 	}
+	// Optional skips only credentials that fail at start, never the checks.
+	c = testConfig()
+	c.GitHub.Optional, c.GitLab.Optional = true, true
+	raw, _ = json.Marshal(c)
+	os.WriteFile(path, raw, 0600)
+	if _, err := loadConfig(path); err != nil || !strings.Contains(string(raw), `"optional":true`) {
+		t.Fatalf("optional providers: %v", err)
+	}
+	c.GitHub.Repositories = nil
+	if c.validate() == nil {
+		t.Fatal("optional GitHub accepted without an allowlist")
+	}
+	c = testConfig()
+	c.GitLab.Optional, c.GitLab.ExpectedUser = true, ""
+	if c.validate() == nil {
+		t.Fatal("optional GitLab accepted without expected_user")
+	}
 }
 func TestExpiryCoversSessionAtUTCMidnight(t *testing.T) {
 	for _, tc := range []struct {

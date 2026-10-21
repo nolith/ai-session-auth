@@ -61,6 +61,38 @@ func TestCredentialProtocol(t *testing.T) {
 		t.Fatal("store operation accessed broker")
 	}
 }
+func TestBrokerSkippedProviders(t *testing.T) {
+	now := time.Now()
+	b := &Broker{Config: testConfig(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubSkipped: "no login", GitLabSkipped: "issuer failed"}
+	for _, tc := range []struct {
+		request BrokerRequest
+		want    string
+	}{
+		{BrokerRequest{Service: "github"}, "GitHub is not available in this session: no login"},
+		{BrokerRequest{Service: "gitlab"}, "GitLab is not available in this session: issuer failed"},
+		{BrokerRequest{Service: "git", Protocol: "https", Host: "github.com", Path: "alice/repo.git"}, "GitHub is not available in this session: no login"},
+		{BrokerRequest{Service: "git", Protocol: "https", Host: "gitlab.com", Path: "group/project.git"}, "GitLab is not available in this session: issuer failed"},
+	} {
+		r, err := b.answer(context.Background(), tc.request)
+		if err == nil || err.Error() != tc.want || r.Token != "" || !errors.As(err, new(unavailableError)) {
+			t.Errorf("%+v: %+v %v", tc.request, r, err)
+		}
+	}
+	// Outside the allowlist the helper stays silent, as for any provider.
+	if r, err := b.answer(context.Background(), BrokerRequest{Service: "git", Protocol: "https", Host: "github.com", Path: "alice/other"}); err != nil || r.Token != "" {
+		t.Fatalf("%+v %v", r, err)
+	}
+}
+func TestCredentialQuitsForSkippedProvider(t *testing.T) {
+	var out bytes.Buffer
+	query := func(BrokerRequest) (BrokerResponse, error) {
+		return BrokerResponse{Quit: true}, errors.New("GitLab is not available in this session: issuer failed")
+	}
+	err := credentialWith("get", strings.NewReader("protocol=https\nhost=gitlab.com\npath=group/project.git\n\n"), &out, query)
+	if err == nil || out.String() != "quit=1\n\n" {
+		t.Fatalf("%q %v", out.String(), err)
+	}
+}
 func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	dir := t.TempDir()
 	binary := "/tmp/test 'auth'"
@@ -536,5 +568,103 @@ func TestPathWithout(t *testing.T) {
 	value := strings.Join([]string{bin, "/usr/bin", bin + "/", link, "", "/bin"}, string(os.PathListSeparator))
 	if got, want := pathWithout(value, bin), strings.Join([]string{"/usr/bin", "", "/bin"}, string(os.PathListSeparator)); got != want {
 		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+// optionalSession runs the launcher to its end with a GitHub login never made
+// and a glab issuer that fails, each optional as given, and returns its output,
+// its exit code and the fake glab's directory. The gh beside that glab only
+// records that it ran.
+func optionalSession(t *testing.T, github, gitlab bool, script string) (string, int, string) {
+	t.Helper()
+	fakes := fakeGlab(t)
+	gh := "#!/bin/sh\ntouch " + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
+	if err := os.WriteFile(filepath.Join(fakes, "gh"), []byte(gh), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	c := testConfig()
+	c.SessionHours = 1
+	c.GitHub.StateFile = filepath.Join(dir, "github.json")
+	c.GitHub.Optional = github
+	c.GitLab = glabConfig()
+	c.GitLab.Optional = gitlab
+	raw, _ := json.Marshal(c)
+	config := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(config, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", script})
+	launcher := exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
+	output, err := launcher.CombinedOutput()
+	if strings.Contains(string(output), "UNIX socket") {
+		t.Skip("runtime prohibits UNIX sockets")
+	}
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatal(err)
+	}
+	return string(output), launcher.ProcessState.ExitCode(), fakes
+}
+
+// With every provider optional and failing, the harness still starts, and the
+// wrappers and Git refuse instead of reaching the real CLIs or a prompt.
+func TestOptionalProvidersAreSkipped(t *testing.T) {
+	script := `gh api user; echo "gh exit $?"; glab api user; echo "glab exit $?"
+if command -v git >/dev/null; then
+	printf 'protocol=https\nhost=gitlab.com\npath=group/project.git\n\n' | git credential fill
+fi
+echo harness done`
+	output, code, fakes := optionalSession(t, true, true, script)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, output)
+	}
+	for _, want := range []string{
+		"WARNING: GitHub is not available in this session: run github-login before starting a session. Fix: agent-auth github-login\n",
+		"WARNING: GitLab is not available in this session: glab issuer request failed. Fix: glab auth login\n",
+		"Session ready without credentials",
+		"agent-auth: GitHub is not available in this session: run github-login before starting a session\ngh exit 1\n",
+		"agent-auth: GitLab is not available in this session: glab issuer request failed\nglab exit 1\n",
+		"harness done\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output lacks %q:\n%s", want, output)
+		}
+	}
+	if _, err := exec.LookPath("git"); err == nil && !strings.Contains(output, "told us to quit") {
+		t.Errorf("Git did not stop at the helper:\n%s", output)
+	}
+	if strings.Contains(output, "glab-secret") {
+		t.Errorf("issuer output leaked:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(fakes, "gh-called")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the gh wrapper reached the real gh")
+	}
+	// The issuer's user check, and nothing after it: no PAT, so no reaper and
+	// no revocation; the glab wrapper never reached the real glab.
+	calls := fakeGlabCalls(t, fakes)
+	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"--method", "GET", "user"}) {
+		t.Errorf("glab calls: %q", calls)
+	}
+}
+
+// A required provider that fails stops the session before the harness.
+func TestRequiredProviderFailureStopsSession(t *testing.T) {
+	for _, tc := range []struct {
+		github, gitlab bool
+		want           string
+		glabCalls      int
+	}{
+		{false, true, "agent-auth: run github-login before starting a session\n", 0},
+		{true, false, "agent-auth: glab issuer request failed\n", 1},
+	} {
+		output, code, fakes := optionalSession(t, tc.github, tc.gitlab, "echo harness started")
+		if code != 1 || !strings.HasSuffix(output, tc.want) || strings.Contains(output, "harness started") {
+			t.Errorf("optional GitHub %v, GitLab %v: exit %d:\n%s", tc.github, tc.gitlab, code, output)
+		}
+		if calls := fakeGlabCalls(t, fakes); len(calls) != tc.glabCalls {
+			t.Errorf("optional GitHub %v, GitLab %v: glab calls: %q", tc.github, tc.gitlab, calls)
+		}
 	}
 }

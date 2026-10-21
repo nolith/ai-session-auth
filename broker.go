@@ -25,14 +25,27 @@ type BrokerResponse struct {
 	Token    string `json:"token,omitempty"`
 	Username string `json:"username,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// Quit tells Git to stop asking other helpers and the user.
+	Quit bool `json:"quit,omitempty"`
 }
 type Broker struct {
 	mu          sync.RWMutex
 	Config      Config
 	GitHubToken func(context.Context) (string, error)
 	GitLabToken string
-	Deadline    time.Time
-	Now         func() time.Time
+	// Why an optional provider was skipped at start; it then stays unavailable.
+	GitHubSkipped string
+	GitLabSkipped string
+	Deadline      time.Time
+	Now           func() time.Time
+}
+
+// unavailableError answers for a skipped provider, which never falls back to
+// your own credentials.
+type unavailableError struct{ provider, reason string }
+
+func (e unavailableError) Error() string {
+	return e.provider + " is not available in this session: " + e.reason
 }
 
 func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerResponse, error) {
@@ -68,6 +81,9 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 	}
 	switch service {
 	case "github":
+		if b.GitHubSkipped != "" {
+			return BrokerResponse{}, unavailableError{"GitHub", b.GitHubSkipped}
+		}
 		if b.GitHubToken != nil {
 			token, err := b.GitHubToken(ctx)
 			if err != nil {
@@ -78,6 +94,9 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 	case "gitlab":
 		b.mu.RLock()
 		defer b.mu.RUnlock()
+		if b.GitLabSkipped != "" {
+			return BrokerResponse{}, unavailableError{"GitLab", b.GitLabSkipped}
+		}
 		if b.GitLabToken != "" {
 			return BrokerResponse{Token: b.GitLabToken, Username: "oauth2"}, nil
 		}
@@ -151,7 +170,7 @@ func (s *BrokerServer) serve() {
 				connection.SetWriteDeadline(time.Now().Add(60 * time.Second))
 				value, err := s.broker.answer(s.ctx, request)
 				if err != nil {
-					response = BrokerResponse{Error: err.Error()}
+					response = BrokerResponse{Error: err.Error(), Quit: errors.As(err, new(unavailableError))}
 				} else {
 					response = value
 				}

@@ -192,6 +192,10 @@ func credentialWith(operation string, input io.Reader, output io.Writer, request
 		return errors.New("invalid Git credential request")
 	}
 	response, err := request(BrokerRequest{Service: "git", Protocol: values["protocol"], Host: values["host"], Path: values["path"]})
+	if response.Quit {
+		// Git then fails at once, with no askpass or terminal prompt.
+		fmt.Fprint(output, "quit=1\n\n")
+	}
 	if err != nil {
 		return err
 	}

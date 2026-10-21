@@ -215,6 +215,18 @@ Use absolute paths to launch the harness from another checkout:
 The current working directory and command arguments are preserved.
 To use only one provider, set `enabled: false` for the other.
 
+A provider with `optional: true` (default `false`) does not stop the session
+when its credential cannot be obtained at start: a missing, unreadable or
+expired GitHub login, a failed refresh or `expected_user` check, or for GitLab
+a failed issuer (logged-out glab, unreadable `issuer_token_file`), user check,
+group or project resolution or PAT creation. The launcher prints one warning
+per skipped provider, with the reason and the fix (`agent-auth github-login`,
+`glab auth login` or `agent-auth save-gitlab-issuer`), and starts the harness
+even if every enabled provider was skipped. Configuration errors, a missing
+`gh` or `glab`, and an interrupted start still stop it. The example marks
+GitHub optional, so a lapsed GitHub login does not keep agents from starting
+with GitLab.
+
 ## Verify on your account
 
 Before starting an operational session, open a verification shell:
@@ -284,6 +296,15 @@ expiry or earlier invalidation by GitHub.
 A running `gh` command cannot replace its token while it executes; restart
 long-running watch commands if they cross a token expiry or rotation.
 
+A skipped optional provider stays unavailable for the whole session, and never
+falls back to your own login: its wrapper, temporary CLI configuration and
+credential helper remain in place. `gh` or `glab` then fails with
+"GitHub is not available in this session: <reason>" (or GitLab) without
+running the real CLI, and Git HTTPS to an allowlisted repository on that host
+fails at once, with the helper telling Git to quit rather than ask a terminal
+or askpass program. A skipped GitLab mints no PAT, so there is no reaper and
+nothing to revoke at exit. Start a new session after fixing the login.
+
 ## Limits and isolation
 
 This launcher manages credential lifecycles; **it is not a sandbox**.
@@ -342,7 +363,9 @@ project resolution, scope building, namespace and repository allowlists, the
 Git credential protocol, PATH shims and the wrapper loop guard, URL rewriting
 with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
 after SIGHUP with the output gone, the reaper after SIGKILL and its silence
-after a clean exit, and cancellable issuer input.
+after a clean exit, cancellable issuer input, and optional providers skipped
+with warnings while their wrappers and Git refuse, or stopping the session when
+required.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:
 formatting, vet, race-enabled tests, and the build. All 15 tests passed on

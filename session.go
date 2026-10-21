@@ -100,6 +100,24 @@ func stopProcessGroup(processGroup int, wait <-chan error, grace time.Duration) 
 	}
 }
 
+// skippable reports why an optional provider is skipped, or "" when err must
+// stop the session: the provider is required, or the session was interrupted.
+// The reason, like main's, names no local path.
+func skippable(ctx context.Context, optional bool, err error) string {
+	if !optional || ctx.Err() != nil {
+		return ""
+	}
+	if errors.As(err, new(*os.PathError)) {
+		return "local file or permission error"
+	}
+	return err.Error()
+}
+
+// skip warns that an optional provider is unavailable, and how to fix it.
+func skip(output io.Writer, provider, reason, fix string) {
+	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
+}
+
 func runSession(ctx context.Context, config Config, args []string, api *API, output io.Writer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
@@ -108,13 +126,30 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	if err != nil {
 		return 1, err
 	}
+	gitlabFix := "agent-auth save-gitlab-issuer"
+	if config.GitLab.Issuer == "glab" {
+		gitlabFix = "glab auth login"
+	}
+	// A skipped optional provider keeps its wrapper, configuration directory
+	// and credential helper, whose answer is then an error: never your own
+	// credentials.
+	var githubSkipped, gitlabSkipped string
 	// Before the session's own wrappers exist: a glab issuer resolves the glab
 	// on your PATH.
 	var gitlab *GitLab
 	if enabled(config.GitLab.Enabled) {
 		gitlab, err = newGitLab(config.GitLab, api)
 		if err != nil {
-			return 1, err
+			// A missing glab is setup, like a missing gh; an unreadable issuer
+			// file is a credential, like GitHub's state file.
+			if config.GitLab.Issuer == "glab" {
+				return 1, err
+			}
+			if gitlabSkipped = skippable(ctx, config.GitLab.Optional, err); gitlabSkipped == "" {
+				return 1, err
+			}
+			skip(output, "GitLab", gitlabSkipped, gitlabFix)
+			gitlab = nil
 		}
 	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
@@ -132,11 +167,15 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	if enabled(config.GitHub.Enabled) {
 		github = &GitHub{Config: config.GitHub, API: api, Now: time.Now}
 		token, err := github.token(ctx)
-		if err != nil {
-			return 1, err
+		if err == nil {
+			err = github.verify(ctx, token)
 		}
-		if err = github.verify(ctx, token); err != nil {
-			return 1, err
+		if err != nil {
+			if githubSkipped = skippable(ctx, config.GitHub.Optional, err); githubSkipped == "" {
+				return 1, err
+			}
+			skip(output, "GitHub", githubSkipped, "agent-auth github-login")
+			github = nil
 		}
 	}
 	// The reaper's pipe: closed without "revoked", it revokes the PAT itself.
@@ -165,7 +204,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 			fmt.Fprintln(output, "GitLab session PAT revoked.")
 		}()
 	}
-	broker := &Broker{Config: config, Deadline: time.Now().Add(config.duration()), Now: time.Now}
+	broker := &Broker{Config: config, Deadline: time.Now().Add(config.duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
 	if github != nil {
 		broker.GitHubToken = github.token
 	}
@@ -178,16 +217,28 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	if gitlab != nil {
 		token, createErr := gitlab.create(ctx, config.duration())
 		err = createErr
+		// Skipped only before a PAT exists: one that was minted is revoked at
+		// exit, which a skipped provider never needs.
+		if err != nil && len(gitlab.Created) == 0 {
+			gitlabSkipped = skippable(ctx, config.GitLab.Optional, err)
+		}
 		broker.mu.Lock()
 		broker.GitLabToken = token
+		broker.GitLabSkipped = gitlabSkipped
 		broker.mu.Unlock()
-		if err != nil {
+		if err != nil && gitlabSkipped == "" {
 			return 1, err
 		}
-		if reaper, err = startReaper(binary, config.source, gitlab.Created[0]); err != nil {
+		if err != nil {
+			skip(output, "GitLab", gitlabSkipped, gitlabFix)
+		} else if reaper, err = startReaper(binary, config.source, gitlab.Created[0]); err != nil {
 			return 1, err
 		}
 	}
-	fmt.Fprintln(output, "Session ready: user credentials available through gh/glab and Git HTTPS.")
+	if (githubSkipped != "" || !enabled(config.GitHub.Enabled)) && (gitlabSkipped != "" || !enabled(config.GitLab.Enabled)) {
+		fmt.Fprintln(output, "Session ready without credentials: every enabled provider was skipped.")
+	} else {
+		fmt.Fprintln(output, "Session ready: user credentials available through gh/glab and Git HTTPS.")
+	}
 	return runHarness(ctx, args, environment, config.duration())
 }

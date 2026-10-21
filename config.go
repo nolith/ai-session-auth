@@ -20,6 +20,7 @@ type Scope struct {
 }
 type GitHubConfig struct {
 	Enabled      *bool    `json:"enabled,omitempty"`
+	Optional     bool     `json:"optional,omitempty"`
 	ClientID     string   `json:"client_id"`
 	ExpectedUser string   `json:"expected_user"`
 	StateFile    string   `json:"state_file"`
@@ -27,6 +28,7 @@ type GitHubConfig struct {
 }
 type GitLabConfig struct {
 	Enabled          *bool    `json:"enabled,omitempty"`
+	Optional         bool     `json:"optional,omitempty"`
 	ExpectedUser     string   `json:"expected_user"`
 	Issuer           string   `json:"issuer,omitempty"`
 	IssuerTokenFile  string   `json:"issuer_token_file,omitempty"`
