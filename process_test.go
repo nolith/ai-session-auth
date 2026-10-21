@@ -260,6 +260,48 @@ func TestBrokerGitLabNamespaces(t *testing.T) {
 	}
 }
 
+func TestBrokerGitHubOwners(t *testing.T) {
+	now := time.Now()
+	c := testConfig()
+	c.GitHub.Owners = []string{"nolith", "Some-Org"}
+	b := &Broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"nolith/anything.git", true},
+		{"NOLITH/Anything", true},
+		{"some-org/repo", true},
+		{"alice/repo", true},
+		{"ALICE/REPO.git", true},
+		{"nolith-foo/repo", false},
+		{"nolithx/repo", false},
+		{"no/lith/repo", false},
+		{"nolith", false},
+		{"alice/other", false},
+		{"someone-else/x", false},
+		{"nolith/../evil/x", false},
+		{"nolith/%2e%2e/x", false},
+	} {
+		r, err := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "github.com", Path: tc.path, Protocol: "https"})
+		if err != nil || (r.Token != "") != tc.want {
+			t.Errorf("%+v: %+v %v", tc, r, err)
+		}
+	}
+	// Owners alone, without explicit repositories.
+	b.Config.GitHub.Repositories = nil
+	if r, _ := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "github.com", Path: "alice/repo", Protocol: "https"}); r.Token != "" {
+		t.Fatal("repository allowed after removing it")
+	}
+	if r, _ := b.answer(context.Background(), BrokerRequest{Service: "git", Host: "github.com", Path: "nolith/repo", Protocol: "https"}); r.Token == "" {
+		t.Fatal("owner not allowed without repositories")
+	}
+	// GitLab stays case-sensitive whatever the GitHub owners.
+	if gitlabAllowed(GitLabConfig{Groups: []string{"nolith"}}, "NOLITH/project") {
+		t.Fatal("GitLab group matched in another case")
+	}
+}
+
 // TestMain lets a test re-execute this binary as the launcher itself, with
 // main's own signal handling, by passing its arguments as JSON. The launcher
 // re-executes it too, as "_reaper" or "_proxy".

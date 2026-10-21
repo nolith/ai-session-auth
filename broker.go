@@ -71,7 +71,7 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		}
 		var permitted bool
 		if service == "github" {
-			permitted = slices.ContainsFunc(b.Config.GitHub.Repositories, func(repo string) bool { return strings.EqualFold(repo, path) })
+			permitted = githubAllowed(b.Config.GitHub, path)
 		} else {
 			permitted = gitlabAllowed(b.Config.GitLab, path)
 		}
@@ -102,6 +102,19 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		}
 	}
 	return BrokerResponse{}, errors.New("service not enabled")
+}
+
+// githubAllowed reports whether a Git path is an allowed repository or inside
+// an allowed owner, by whole leading segment like gitlabAllowed. GitHub names
+// are case-insensitive, so the comparison is too.
+func githubAllowed(c GitHubConfig, path string) bool {
+	if slices.ContainsFunc(c.Repositories, func(repo string) bool { return strings.EqualFold(repo, path) }) {
+		return true
+	}
+	return slices.ContainsFunc(c.Owners, func(owner string) bool {
+		prefix := owner + "/"
+		return len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
+	})
 }
 
 // gitlabAllowed reports whether a Git path is inside the configured namespaces:

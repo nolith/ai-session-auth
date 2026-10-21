@@ -92,6 +92,38 @@ func TestConfigRejectsBroaderScopeAndMissingPaths(t *testing.T) {
 		t.Fatal("optional GitLab accepted without expected_user")
 	}
 }
+func TestGitHubOwnersConfig(t *testing.T) {
+	c := testConfig()
+	c.GitHub.Repositories, c.GitHub.Owners = nil, []string{"nolith", "some-org"}
+	if err := c.validate(); err != nil {
+		t.Fatalf("owners alone: %v", err)
+	}
+	c.GitHub.Repositories = []string{"alice/repo"}
+	if err := c.validate(); err != nil {
+		t.Fatalf("owners and repositories: %v", err)
+	}
+	c.GitHub.Repositories, c.GitHub.Owners = nil, nil
+	if err := c.validate(); err == nil || err.Error() != "configure GitHub repositories or owners" {
+		t.Fatalf("no allowlist: %v", err)
+	}
+	for _, owner := range []string{"", "nolith/repo", "nolith/", "/nolith", "*", "noli*", "nolith:x", ".", "..", "no lith\n", "nolith.git", "nolith%2f"} {
+		c.GitHub.Owners = []string{owner}
+		if c.validate() == nil {
+			t.Errorf("accepted owner %q", owner)
+		}
+	}
+	c.GitHub.Owners = []string{"nolith", "Nolith"}
+	if c.validate() == nil {
+		t.Fatal("accepted the same owner twice in another case")
+	}
+	// Loaded from JSON, as written in a configuration.
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := []byte(`{"github":{"client_id":"app","expected_user":"alice","state_file":"state.json","owners":["nolith"]},"gitlab":{"enabled":false}}`)
+	os.WriteFile(path, raw, 0600)
+	if loaded, err := loadConfig(path); err != nil || !slices.Equal(loaded.GitHub.Owners, []string{"nolith"}) {
+		t.Fatalf("%+v %v", loaded.GitHub, err)
+	}
+}
 func TestExpiryCoversSessionAtUTCMidnight(t *testing.T) {
 	for _, tc := range []struct {
 		now   string

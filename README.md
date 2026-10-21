@@ -73,6 +73,14 @@ Leave Administration, Secrets, and protection bypass privileges disabled.
    Organizations may require administrator approval and an active SSO session.
 6. Copy the **Client ID**, not the App ID, into the configuration.
 7. Set `expected_user` to your GitHub username.
+8. Set where Git receives the token, by path and in any letter case, as
+   GitHub compares names; use either list or both:
+   - `owners`: accounts or organizations, such as `nolith`, one segment
+     each, without wildcards. An owner covers all of its repositories, forks
+     included; `nolith` never matches `nolith-foo/...`.
+   - `repositories`: single repositories, such as `some-org/project`.
+
+   The App installation remains the token's real boundary.
 
 User tokens can perform only operations allowed to both your user and the App.
 Commit authorship also depends on `git config user.name/user.email`: the token
@@ -193,7 +201,7 @@ The launcher queries the projects and verifies that their IDs and paths match.
 
 ```bash
 cp config.example.json config.json
-# Set the Client ID, usernames, GitHub repositories and GitLab groups before proceeding.
+# Set the Client ID, usernames, GitHub owners or repositories and GitLab groups before proceeding.
 ./agent-auth --config config.json save-gitlab-issuer   # not with issuer "glab"
 ./agent-auth --config config.json github-login
 ./agent-auth --config config.json run -- codex
@@ -319,8 +327,9 @@ intentionally provides access to the temporary tokens.
 The credential helper's allowlist controls where the helper returns tokens;
 it does not restrict the CLIs' API calls. GitLab enforces the group and
 project boundaries through the token's granular scopes. GitHub enforces the
-repositories accessible to the App: `github.repositories` restricts Git
-credential delivery and does not further narrow the token's API access.
+repositories accessible to the App: `github.owners` and `github.repositories`
+restrict Git credential delivery and do not further narrow the token's API
+access.
 Install the App only on the required repositories.
 
 The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`. A
@@ -359,7 +368,7 @@ nix flake check      # formatting, vet, race-enabled tests and the build
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
 fake `glab` (arguments, environment, locking, silent failures), group and
-project resolution, scope building, namespace and repository allowlists, the
+project resolution, scope building, namespace, owner and repository allowlists, the
 Git credential protocol, PATH shims and the wrapper loop guard, URL rewriting
 with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
 after SIGHUP with the output gone, the reaper after SIGKILL and its silence

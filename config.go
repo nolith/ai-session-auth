@@ -25,6 +25,8 @@ type GitHubConfig struct {
 	ExpectedUser string   `json:"expected_user"`
 	StateFile    string   `json:"state_file"`
 	Repositories []string `json:"repositories"`
+	// Accounts or organizations whose repositories are all allowed.
+	Owners []string `json:"owners,omitempty"`
 }
 type GitLabConfig struct {
 	Enabled          *bool    `json:"enabled,omitempty"`
@@ -114,10 +116,13 @@ func (c Config) validate() error {
 		return errors.New("enable at least one provider")
 	}
 	if enabled(c.GitHub.Enabled) {
-		if len(c.GitHub.Repositories) == 0 {
-			return errors.New("configure an explicit github repository allowlist")
+		if len(c.GitHub.Repositories) == 0 && len(c.GitHub.Owners) == 0 {
+			return errors.New("configure GitHub repositories or owners")
 		}
 		if err := validatePaths(c.GitHub.Repositories, true, true); err != nil {
+			return err
+		}
+		if err := validateOwners(c.GitHub.Owners); err != nil {
 			return err
 		}
 		if c.GitHub.ClientID == "" || c.GitHub.ExpectedUser == "" || c.GitHub.StateFile == "" {
@@ -167,6 +172,23 @@ func validatePaths(paths []string, project, fold bool) error {
 			return errors.New("duplicate path in allowlist")
 		}
 		seen[key] = true
+	}
+	return nil
+}
+
+// validateOwners accepts distinct GitHub accounts or organizations, one path
+// segment each, compared case-insensitively.
+func validateOwners(owners []string) error {
+	seen := map[string]bool{}
+	for _, owner := range owners {
+		normalized, ok := normalizeGitPath(owner)
+		if !ok || normalized != owner || strings.ContainsAny(owner, "/:*") {
+			return errors.New("GitHub owners must be an account or organization name, without slash or wildcard")
+		}
+		if seen[strings.ToLower(owner)] {
+			return errors.New("duplicate path in allowlist")
+		}
+		seen[strings.ToLower(owner)] = true
 	}
 	return nil
 }
