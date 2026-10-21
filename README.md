@@ -1,4 +1,13 @@
-# Temporary credentials for AI agents, under your own identity
+<p align="center">
+  <img src="assets/geas.svg" alt="GEAS logo: a gold key bound in a teal Celtic knot" width="160">
+</p>
+
+# GEAS: temporary credentials for AI agents, under your own identity
+
+GEAS stands for "GEAS Enforces Agent Scopes". In Celtic myth a geas is a
+binding obligation laid on a hero: power, held under rules. Agents started
+with `geas` act as you, but only through short-lived credentials scoped to the
+repositories you allow.
 
 A Go launcher for GitHub.com and GitLab.com on Linux and macOS (amd64 and arm64).
 It has no external Go dependencies. Build with Go 1.23 or later; use the latest
