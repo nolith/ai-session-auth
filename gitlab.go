@@ -53,10 +53,10 @@ type glabIssuer struct {
 }
 
 // glabUnset keeps the issuer on the user's own gitlab.com login: no token or
-// temporary config from an enclosing session (without AI_AUTH_SOCKET, that
+// temporary config from an enclosing session (without GEAS_SOCKET, that
 // session's glab wrapper fails instead of answering), no host override, and no
 // HTTP debugging, which prints credentials.
-var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "AI_AUTH_SOCKET", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
+var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "GEAS_SOCKET", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
 func newGlabIssuer() (glabIssuer, error) {
 	executable, err := executableLookup("glab")
@@ -74,13 +74,13 @@ func newGlabIssuer() (glabIssuer, error) {
 }
 func stateDirectory() (string, error) {
 	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
-		return filepath.Join(state, "ai-session-auth"), nil
+		return filepath.Join(state, "geas"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "state", "ai-session-auth"), nil
+	return filepath.Join(home, ".local", "state", "geas"), nil
 }
 func (g glabIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
 	return g.run(ctx, out, "--method", method, endpoint)
@@ -188,7 +188,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	if _, err := rand.Read(random); err != nil {
 		return "", err
 	}
-	name := "ai-session-" + hex.EncodeToString(random)
+	name := "geas-" + hex.EncodeToString(random)
 	variables := map[string]any{"input": map[string]any{
 		"name": name, "expiresAt": expiryForDuration(g.Now(), duration), "granularScopes": scopes,
 	}}

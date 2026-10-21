@@ -258,7 +258,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 				t.Error(err)
 			}
 			name = payload.Variables.Input.Name
-			if !strings.HasPrefix(name, "ai-session-") || payload.Variables.Input.ExpiresAt != "2026-10-10" || len(payload.Variables.Input.Scopes) != 2 {
+			if !strings.HasPrefix(name, "geas-") || payload.Variables.Input.ExpiresAt != "2026-10-10" || len(payload.Variables.Input.Scopes) != 2 {
 				t.Error("bad PAT input")
 			}
 			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
@@ -438,7 +438,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := input.Name
-	if !strings.HasPrefix(name, "ai-session-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 || input.Scopes[1].ResourceIDs[0] != "gid://gitlab/Project/42" {
+	if !strings.HasPrefix(name, "geas-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 || input.Scopes[1].ResourceIDs[0] != "gid://gitlab/Project/42" {
 		t.Errorf("bad PAT input %+v", input)
 	}
 	if !slices.Equal(calls[3][3:], []string{"--method", "GET", "personal_access_tokens?per_page=100&search=" + name}) {
@@ -467,7 +467,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 			t.Errorf("call %d shares the launcher's process group: %q %v", n, pgid, err)
 		}
 	}
-	info, err := os.Stat(filepath.Join(state, "ai-session-auth", "glab.lock"))
+	info, err := os.Stat(filepath.Join(state, "geas", "glab.lock"))
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("lock: %v %v", info, err)
 	}
@@ -682,8 +682,8 @@ func TestRevokeCheckedLeavesOtherTokens(t *testing.T) {
 		revoked bool
 		fails   bool
 	}{
-		{"active", map[string]any{"name": "ai-session-x", "active": true}, true, false},
-		{"already revoked", map[string]any{"name": "ai-session-x", "active": false}, false, false},
+		{"active", map[string]any{"name": "geas-x", "active": true}, true, false},
+		{"already revoked", map[string]any{"name": "geas-x", "active": false}, false, false},
 		{"another token", map[string]any{"name": "someone-else", "active": true}, false, true},
 	} {
 		deleted := false
@@ -695,7 +695,7 @@ func TestRevokeCheckedLeavesOtherTokens(t *testing.T) {
 			return 200, tc.current
 		})
 		g := &GitLab{Issuer: bearerIssuer{api: api, token: "issuer"}}
-		revoked, err := g.revokeChecked(context.Background(), sessionPAT{Name: "ai-session-x", ID: 42})
+		revoked, err := g.revokeChecked(context.Background(), sessionPAT{Name: "geas-x", ID: 42})
 		if revoked != tc.revoked || deleted != tc.revoked || (err != nil) != tc.fails {
 			t.Errorf("%s: revoked %v, deleted %v, err %v", tc.name, revoked, deleted, err)
 		}

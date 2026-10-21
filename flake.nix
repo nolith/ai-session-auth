@@ -1,5 +1,5 @@
 {
-  description = "Temporary credentials for AI agents, under your own identity";
+  description = "GEAS Enforces Agent Scopes: temporary credentials for AI agents, under your own identity";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -26,9 +26,9 @@
     in
     {
       packages = forAllSystems (pkgs: {
-        default = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-auth;
-        agent-auth = pkgs.buildGoModule {
-          pname = "agent-auth";
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.geas;
+        geas = pkgs.buildGoModule {
+          pname = "geas";
           version = self.shortRev or self.dirtyShortRev or "dev";
 
           src = lib.fileset.toSource {
@@ -45,9 +45,6 @@
             "-s"
             "-w"
           ];
-          postInstall = ''
-            mv "$out/bin/ai-session-auth" "$out/bin/agent-auth"
-          '';
 
           # The tests run real Git, ps, /bin/sh and UNIX sockets.
           nativeCheckInputs = [
@@ -62,8 +59,8 @@
 
           meta = {
             description = "Launch AI agents with short-lived GitHub and GitLab credentials";
-            homepage = "https://github.com/nolith/ai-session-auth";
-            mainProgram = "agent-auth";
+            homepage = "https://github.com/nolith/geas";
+            mainProgram = "geas";
             platforms = lib.platforms.linux ++ lib.platforms.darwin;
           };
         };
@@ -72,13 +69,13 @@
       formatter = forAllSystems treefmtFor;
 
       checks = forAllSystems (pkgs: {
-        build = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-auth;
+        build = self.packages.${pkgs.stdenv.hostPlatform.system}.geas;
         formatting = (treefmtFor pkgs).check self;
       });
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.agent-auth ];
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.geas ];
           packages = [
             pkgs.gopls
             pkgs.gh

@@ -5,9 +5,9 @@ It has no external Go dependencies. Build with Go 1.23 or later; use the latest
 stable release where possible. Install `git`, `gh`, and `glab` in your `PATH`.
 
 ```bash
-git clone https://github.com/nolith/ai-session-auth.git
-cd ai-session-auth
-go build -o agent-auth .
+git clone https://github.com/nolith/geas.git
+cd geas
+go build -o geas .
 ```
 
 The compiled binary does not require a Go runtime.
@@ -16,7 +16,7 @@ With Nix, build or run it from the flake, or enter a shell with Go, `gh`,
 `glab`, and the formatter:
 
 ```bash
-nix build            # ./result/bin/agent-auth
+nix build            # ./result/bin/geas
 nix run . -- --help
 nix develop
 ```
@@ -24,7 +24,7 @@ nix develop
 Start an AI harness with API and Git HTTPS access under your own identity:
 
 ```bash
-./agent-auth --config config.json run -- codex
+./geas --config config.json run -- codex
 ```
 
 Replace `codex` with any command and its arguments.
@@ -109,12 +109,12 @@ Every issuer request then runs `glab api --hostname gitlab.com ...`:
   gitlab.com: neither the current repository's remote nor glab's `:fullpath`
   style placeholders can redirect a request.
 - glab runs without `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`,
-  `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, `AI_AUTH_SOCKET`, host overrides or HTTP
+  `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, `GEAS_SOCKET`, host overrides or HTTP
   debugging, so it acts with your own login, never with a session's.
-- Calls are serialized through `$XDG_STATE_HOME/ai-session-auth/glab.lock`
-  (`~/.local/state/ai-session-auth/glab.lock` by default). GitLab returns a
+- Calls are serialized through `$XDG_STATE_HOME/geas/glab.lock`
+  (`~/.local/state/geas/glab.lock` by default). GitLab returns a
   new refresh token on every refresh, so two glab processes refreshing at once
-  can race. The lock covers agent-auth's own calls, not yours.
+  can race. The lock covers geas's own calls, not yours.
 - Each call gets one minute, so a keyring waiting to be unlocked fails the
   request instead of stalling the session.
 - glab's output is never printed. A failure reports only "glab issuer request
@@ -202,9 +202,9 @@ The launcher queries the projects and verifies that their IDs and paths match.
 ```bash
 cp config.example.json config.json
 # Set the Client ID, usernames, GitHub owners or repositories and GitLab groups before proceeding.
-./agent-auth --config config.json save-gitlab-issuer   # not with issuer "glab"
-./agent-auth --config config.json github-login
-./agent-auth --config config.json run -- codex
+./geas --config config.json save-gitlab-issuer   # not with issuer "glab"
+./geas --config config.json github-login
+./geas --config config.json run -- codex
 ```
 
 `save-gitlab-issuer` prompts for the PAT with hidden input. Do not put it in the
@@ -216,8 +216,8 @@ state at `state_file`.
 Use absolute paths to launch the harness from another checkout:
 
 ```bash
-/path/ai-session-auth/agent-auth \
-  --config /path/ai-session-auth/config.json run -- codex
+/path/geas/geas \
+  --config /path/geas/config.json run -- codex
 ```
 
 The current working directory and command arguments are preserved.
@@ -228,8 +228,8 @@ when its credential cannot be obtained at start: a missing, unreadable or
 expired GitHub login, a failed refresh or `expected_user` check, or for GitLab
 a failed issuer (logged-out glab, unreadable `issuer_token_file`), user check,
 group or project resolution or PAT creation. The launcher prints one warning
-per skipped provider, with the reason and the fix (`agent-auth github-login`,
-`glab auth login` or `agent-auth save-gitlab-issuer`), and starts the harness
+per skipped provider, with the reason and the fix (`geas github-login`,
+`glab auth login` or `geas save-gitlab-issuer`), and starts the harness
 even if every enabled provider was skipped. Configuration errors, a missing
 `gh` or `glab`, and an interrupted start still stop it. The example marks
 GitHub optional, so a lapsed GitHub login does not keep agents from starting
@@ -240,7 +240,7 @@ with GitLab.
 Before starting an operational session, open a verification shell:
 
 ```bash
-./agent-auth --config config.json run -- bash
+./geas --config config.json run -- bash
 ```
 
 Inside the shell, verify your identity and read-only operations:
@@ -278,7 +278,7 @@ interrupt a revocation.
 
 Some terminals do not wait: closing a herdr pane follows SIGHUP and SIGTERM
 with SIGKILL about half a second later. After minting, the launcher therefore
-starts a reaper (`agent-auth _reaper`) in a new session, detached twice so
+starts a reaper (`geas _reaper`) in a new session, detached twice so
 that it is outside the pane's process tree. It receives only the configuration
 path and the PAT's name and ID, and waits on a pipe whose write end only the
 launcher holds. After a clean revocation the launcher tells it so, and the
@@ -286,8 +286,8 @@ reaper exits. If the pipe closes otherwise, because the launcher died by any
 signal or its own revocation failed, the reaper checks that the ID still names
 the session PAT, revokes it through the issuer, retries after 10 seconds and a
 minute if needed, and logs what it did to
-`$XDG_STATE_HOME/ai-session-auth/reaper.log`
-(`~/.local/state/ai-session-auth/reaper.log` by default), never to a terminal.
+`$XDG_STATE_HOME/geas/reaper.log`
+(`~/.local/state/geas/reaper.log` by default), never to a terminal.
 
 If the computer shuts down, both processes are killed, or revocation keeps
 failing because of a network error, the PAT expires on its configured date.
@@ -332,7 +332,7 @@ restrict Git credential delivery and do not further narrow the token's API
 access.
 Install the App only on the required repositories.
 
-The harness must inherit `PATH`, `AI_AUTH_SOCKET`, and `GIT_CONFIG_*`. A
+The harness must inherit `PATH`, `GEAS_SOCKET`, and `GIT_CONFIG_*`. A
 container without the socket mounted, or a shell that clears these variables,
 requires additional configuration. Calling `/usr/bin/gh` directly bypasses the
 wrapper. The real `gh` and `glab` run with the session's wrapper directory

@@ -31,7 +31,7 @@ func reaperLogPath() string {
 	return filepath.Join(state, "reaper.log")
 }
 
-// startReaper starts `agent-auth _reaper detach`, the leader of a new session,
+// startReaper starts `geas _reaper detach`, the leader of a new session,
 // which starts the reaper itself and exits: the reaper is then neither a
 // descendant of the launcher nor in its session. It returns the write end of
 // the reaper's pipe.

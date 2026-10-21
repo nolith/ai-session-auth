@@ -90,7 +90,7 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 		}
 	}
 	env["PATH"] = bin + string(os.PathListSeparator) + env["PATH"]
-	env["AI_AUTH_SOCKET"] = address
+	env["GEAS_SOCKET"] = address
 	env["GH_PROMPT_DISABLED"] = "1"
 	env["GIT_TERMINAL_PROMPT"] = "0"
 	for _, cli := range []string{"gh", "glab"} {
@@ -128,7 +128,7 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 
 // proxyMark is set for the real CLI and everything it starts. Entering the
 // proxy again for the same service means the CLI led back to its wrapper.
-const proxyMark = "AI_AUTH_PROXY"
+const proxyMark = "GEAS_PROXY"
 
 // pathWithout drops dir from a PATH value, however the entry spells it.
 func pathWithout(value, dir string) string {
@@ -169,7 +169,7 @@ func proxyCLI(service, executable string, args []string) error {
 	environment[proxyMark] = service
 	// The recorded CLI may be a shim, such as mise's, that runs the next one on
 	// PATH: without the wrappers there, that is never the wrapper again.
-	environment["PATH"] = pathWithout(environment["PATH"], filepath.Join(filepath.Dir(os.Getenv("AI_AUTH_SOCKET")), "bin"))
+	environment["PATH"] = pathWithout(environment["PATH"], filepath.Join(filepath.Dir(os.Getenv("GEAS_SOCKET")), "bin"))
 	return syscall.Exec(executable, append([]string{executable}, args...), environmentList(environment))
 }
 func credentialWith(operation string, input io.Reader, output io.Writer, request func(BrokerRequest) (BrokerResponse, error)) error {

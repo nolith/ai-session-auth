@@ -17,4 +17,4 @@ jobs:
       # Formatting, go vet, race-enabled tests and the build.
       - run: nix flake check -L
       - run: nix build -L
-      - run: ./result/bin/agent-auth --help
+      - run: ./result/bin/geas --help

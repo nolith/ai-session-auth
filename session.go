@@ -126,7 +126,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	if err != nil {
 		return 1, err
 	}
-	gitlabFix := "agent-auth save-gitlab-issuer"
+	gitlabFix := "geas save-gitlab-issuer"
 	if config.GitLab.Issuer == "glab" {
 		gitlabFix = "glab auth login"
 	}
@@ -153,7 +153,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 		}
 	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
-	directory, err := os.MkdirTemp("/tmp", "ai-auth-")
+	directory, err := os.MkdirTemp("/tmp", "geas-")
 	if err != nil {
 		return 1, err
 	}
@@ -174,7 +174,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 			if githubSkipped = skippable(ctx, config.GitHub.Optional, err); githubSkipped == "" {
 				return 1, err
 			}
-			skip(output, "GitHub", githubSkipped, "agent-auth github-login")
+			skip(output, "GitHub", githubSkipped, "geas github-login")
 			github = nil
 		}
 	}

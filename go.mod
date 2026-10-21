@@ -1,3 +1,3 @@
-module github.com/nolith/ai-session-auth
+module github.com/nolith/geas
 
 go 1.23

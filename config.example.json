@@ -5,7 +5,7 @@
     "optional": true,
     "client_id": "Iv23_REPLACE_WITH_YOUR_APP_CLIENT_ID",
     "expected_user": "YOUR_GITHUB_USERNAME",
-    "state_file": "~/.local/state/ai-session-auth/github.json",
+    "state_file": "~/.local/state/geas/github.json",
     "owners": ["YOUR_GITHUB_USERNAME"],
     "repositories": ["SOME_ORG/YOUR_REPOSITORY"]
   },

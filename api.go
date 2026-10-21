@@ -52,7 +52,7 @@ func (a *API) request(ctx context.Context, method, address, token string, payloa
 		return errors.New("cannot construct API request")
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "ai-session-auth/0.2")
+	request.Header.Set("User-Agent", "geas/0.2")
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

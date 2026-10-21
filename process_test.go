@@ -153,7 +153,7 @@ func TestBrokerSocketRPC(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatal("unsafe socket permissions")
 	}
-	t.Setenv("AI_AUTH_SOCKET", address)
+	t.Setenv("GEAS_SOCKET", address)
 	r, err := rpc(BrokerRequest{Service: "gitlab"})
 	if err != nil || r.Token != "test-secret" {
 		t.Fatalf("%+v %v", r, err)
@@ -306,13 +306,13 @@ func TestBrokerGitHubOwners(t *testing.T) {
 // main's own signal handling, by passing its arguments as JSON. The launcher
 // re-executes it too, as "_reaper" or "_proxy".
 func TestMain(m *testing.M) {
-	if raw, ok := os.LookupEnv("AGENT_AUTH_TEST_ARGS"); ok {
-		os.Unsetenv("AGENT_AUTH_TEST_ARGS")
+	if raw, ok := os.LookupEnv("GEAS_TEST_ARGS"); ok {
+		os.Unsetenv("GEAS_TEST_ARGS")
 		var args []string
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
 			os.Exit(2)
 		}
-		os.Args = append([]string{"agent-auth"}, args...)
+		os.Args = append([]string{"geas"}, args...)
 		main()
 	}
 	// The launcher's own re-executions: the reaper, and gh/glab through _proxy.
@@ -350,7 +350,7 @@ func startSession(t *testing.T, script string) *testSession {
 	}
 	s.output = read
 	s.launcher = exec.Command(os.Args[0])
-	s.launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
+	s.launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
 	s.launcher.Stdout, s.launcher.Stderr = write, write
 	if err = s.launcher.Start(); err != nil {
 		t.Fatal(err)
@@ -472,7 +472,7 @@ func TestCleanExitRevokesOnce(t *testing.T) {
 	if count, checked := deletes(t, s); count != 1 || checked {
 		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
 	}
-	if _, err := os.Stat(filepath.Join(s.state, "ai-session-auth", "reaper.log")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(s.state, "geas", "reaper.log")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("reaper logged on a clean exit: %v", err)
 	}
 }
@@ -505,7 +505,7 @@ func TestKilledLauncherIsReaped(t *testing.T) {
 	if count, checked := deletes(t, s); count != 1 || !checked {
 		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
 	}
-	log, err := os.ReadFile(filepath.Join(s.state, "ai-session-auth", "reaper.log"))
+	log, err := os.ReadFile(filepath.Join(s.state, "geas", "reaper.log"))
 	if err != nil || !strings.Contains(string(log), "launcher gone without revoking; revoked") {
 		t.Fatalf("reaper log: %q %v", log, err)
 	}
@@ -592,7 +592,7 @@ exit 127
 // guard stops it at the second entry instead of spinning.
 func TestProxyLoopFailsFast(t *testing.T) {
 	_, output, err := shimSession(t, `#!/bin/sh
-exec "$(dirname "$AI_AUTH_SOCKET")/bin/glab" "$@"
+exec "$(dirname "$GEAS_SOCKET")/bin/glab" "$@"
 `)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(output, "glab wrapper loop") {
@@ -638,7 +638,7 @@ func optionalSession(t *testing.T, github, gitlab bool, script string) (string, 
 	}
 	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", script})
 	launcher := exec.Command(os.Args[0])
-	launcher.Env = append(os.Environ(), "AGENT_AUTH_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
 	output, err := launcher.CombinedOutput()
 	if strings.Contains(string(output), "UNIX socket") {
 		t.Skip("runtime prohibits UNIX sockets")
@@ -663,11 +663,11 @@ echo harness done`
 		t.Fatalf("exit %d: %s", code, output)
 	}
 	for _, want := range []string{
-		"WARNING: GitHub is not available in this session: run github-login before starting a session. Fix: agent-auth github-login\n",
+		"WARNING: GitHub is not available in this session: run github-login before starting a session. Fix: geas github-login\n",
 		"WARNING: GitLab is not available in this session: glab issuer request failed. Fix: glab auth login\n",
 		"Session ready without credentials",
-		"agent-auth: GitHub is not available in this session: run github-login before starting a session\ngh exit 1\n",
-		"agent-auth: GitLab is not available in this session: glab issuer request failed\nglab exit 1\n",
+		"geas: GitHub is not available in this session: run github-login before starting a session\ngh exit 1\n",
+		"geas: GitLab is not available in this session: glab issuer request failed\nglab exit 1\n",
 		"harness done\n",
 	} {
 		if !strings.Contains(output, want) {
@@ -698,8 +698,8 @@ func TestRequiredProviderFailureStopsSession(t *testing.T) {
 		want           string
 		glabCalls      int
 	}{
-		{false, true, "agent-auth: run github-login before starting a session\n", 0},
-		{true, false, "agent-auth: glab issuer request failed\n", 1},
+		{false, true, "geas: run github-login before starting a session\n", 0},
+		{true, false, "geas: glab issuer request failed\n", 1},
 	} {
 		output, code, fakes := optionalSession(t, tc.github, tc.gitlab, "echo harness started")
 		if code != 1 || !strings.HasSuffix(output, tc.want) || strings.Contains(output, "harness started") {

@@ -13,7 +13,7 @@ import (
 )
 
 func usage(output io.Writer) {
-	fmt.Fprintln(output, `Usage: agent-auth [--config config.json] COMMAND
+	fmt.Fprintln(output, `Usage: geas [--config config.json] COMMAND
 
 Commands:
   github-login                  Authorize your GitHub App once via device flow
@@ -39,7 +39,7 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		}
 		return 0, credentialWith(operation, os.Stdin, os.Stdout, rpc)
 	}
-	flags := flag.NewFlagSet("agent-auth", flag.ContinueOnError)
+	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	path := flags.String("config", "config.json", "configuration path")
 	flags.Usage = func() { usage(os.Stderr) }
@@ -113,9 +113,9 @@ func main() {
 		// API errors are sanitized at their source; avoid printing paths/config secrets.
 		var path *os.PathError
 		if errors.As(err, &path) {
-			fmt.Fprintln(os.Stderr, "agent-auth: local file or permission error")
+			fmt.Fprintln(os.Stderr, "geas: local file or permission error")
 		} else {
-			fmt.Fprintln(os.Stderr, "agent-auth:", err)
+			fmt.Fprintln(os.Stderr, "geas:", err)
 		}
 		if code == 0 {
 			code = 1

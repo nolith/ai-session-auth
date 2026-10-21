@@ -195,7 +195,7 @@ func (s *BrokerServer) serve() {
 func (s *BrokerServer) close() { s.cancel(); s.listener.Close(); s.wg.Wait() }
 func rpc(request BrokerRequest) (BrokerResponse, error) {
 	var response BrokerResponse
-	address := os.Getenv("AI_AUTH_SOCKET")
+	address := os.Getenv("GEAS_SOCKET")
 	if address == "" {
 		return response, errors.New("no active authentication session")
 	}
