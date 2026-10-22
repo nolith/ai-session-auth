@@ -21,6 +21,7 @@ import (
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -142,18 +143,23 @@ type Provider struct {
 	Config  config.GitLabConfig
 	Issuer  issuer
 	Created []PAT
-	Now     func() time.Time
+	// Duration is the session's: a session PAT lives until the UTC midnight
+	// after it.
+	Duration time.Duration
+	Now      func() time.Time
 	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
 	Steps *timing.Timer
 }
 
-func New(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*Provider, error) {
+// New returns the provider for one GitLab host, whose session PATs last for
+// duration. It reads the issuer's credential, or finds glab, but calls nothing.
+func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *timing.Timer) (*Provider, error) {
 	if host.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
 			return nil, err
 		}
-		return &Provider{Config: host, Issuer: glab, Now: time.Now, Steps: steps}, nil
+		return &Provider{Config: host, Issuer: glab, Duration: duration, Now: time.Now, Steps: steps}, nil
 	}
 	raw, err := secretfile.Read(host.IssuerTokenFile)
 	if err != nil {
@@ -163,9 +169,35 @@ func New(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*Provider, 
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &Provider{Config: host, Issuer: bearerIssuer{client: a, token: token}, Now: time.Now, Steps: steps}, nil
+	return &Provider{Config: host, Issuer: bearerIssuer{client: a, token: token}, Duration: duration, Now: time.Now, Steps: steps}, nil
 }
-func (g *Provider) Create(ctx context.Context, duration time.Duration) (string, error) {
+
+var _ provider.Provider = (*Provider)(nil)
+
+// ID names the instance; only gitlab.com is configurable so far.
+func (g *Provider) ID() string   { return "gitlab:gitlab.com" }
+func (g *Provider) Kind() string { return "gitlab" }
+
+// Acquire mints the session PAT and resolves its ID, so that the exit needs a
+// single DELETE.
+func (g *Provider) Acquire(ctx context.Context) (provider.Credential, error) {
+	token, err := g.create(ctx, g.Duration)
+	if err != nil {
+		return provider.Credential{}, err
+	}
+	expires, err := time.Parse("2006-01-02", config.ExpiryForDuration(g.Now(), g.Duration))
+	if err != nil {
+		return provider.Credential{}, err
+	}
+	return provider.Credential{Secret: token, Expires: expires}, nil
+}
+
+// Refresh returns c: a session PAT outlives the session.
+func (g *Provider) Refresh(ctx context.Context, c provider.Credential) (provider.Credential, error) {
+	return c, nil
+}
+
+func (g *Provider) create(ctx context.Context, duration time.Duration) (string, error) {
 	if err := config.ValidateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
@@ -211,7 +243,7 @@ func (g *Provider) Create(ctx context.Context, duration time.Duration) (string, 
 	id, err := g.find(ctx, name)
 	g.Steps.Step("id lookup")
 	if err != nil {
-		return "", err
+		return "", provider.CreatedError{Err: err}
 	}
 	g.Created[len(g.Created)-1].ID = id
 	return result.Data.Create.Token, nil
@@ -475,7 +507,10 @@ func (g *Provider) find(ctx context.Context, name string) (int64, error) {
 	}
 	return id, nil
 }
-func (g *Provider) RevokeCreated(ctx context.Context) error {
+
+// Revoke revokes every PAT this provider created, resolving an ID the start
+// could not.
+func (g *Provider) Revoke(ctx context.Context) error {
 	for len(g.Created) > 0 {
 		pat := g.Created[0]
 		if pat.ID == 0 {

@@ -14,13 +14,14 @@ dependencies outside the standard library.
     internal/secretfile/       owner-only files: atomic writes, locks, the state directory
     internal/timing/           the GEAS_DEBUG=timing step log, cancellable waits
     internal/procenv/          the environment as a map, shared by the session and glab
+    internal/provider/         the Provider interface, shared types
     internal/provider/gitlab/  one GitLab instance: its issuers, PATs, glab config
     internal/provider/github/  GitHub App tokens: state file, refresh, gh config
     internal/testutil/         test fixtures, fakes and the fake glab/gh scripts
 
 Later phases add the rest of the end state:
 
-    internal/provider/         the Provider and Renderer interfaces, shared types
+    internal/provider/         the Renderer interface
     internal/ledger/           revocable credentials on disk, and the reaper
     internal/sessiondir/       the session directory, atomic writes, markers, gitconfig
     internal/credhelper/       `geas credential`, Git's credential helper

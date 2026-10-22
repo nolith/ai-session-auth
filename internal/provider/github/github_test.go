@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/api"
+	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/testutil"
 )
@@ -48,9 +49,9 @@ func TestGitHubConcurrentRotation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, err := g.Token(context.Background())
-			if err != nil || token != "ghu_new" {
-				t.Errorf("token=%s err=%v", token, err)
+			c, err := g.Refresh(context.Background(), provider.Credential{})
+			if err != nil || c.Secret != "ghu_new" || !c.Expires.Equal(now.Add(8*time.Hour)) {
+				t.Errorf("token=%s expires=%v err=%v", c.Secret, c.Expires, err)
 			}
 		}()
 	}

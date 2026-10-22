@@ -18,6 +18,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/timing"
@@ -151,7 +152,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	// on your PATH.
 	var gl *gitlab.Provider
 	if config.Enabled(settings.GitLab.Enabled) {
-		gl, err = gitlab.New(settings.GitLab, api, timer)
+		gl, err = gitlab.New(settings.GitLab, settings.Duration(), api, timer)
 		if err != nil {
 			// A missing glab is setup, like a missing gh; an unreadable issuer
 			// file is a credential, like GitHub's state file.
@@ -176,13 +177,11 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if err != nil {
 		return 1, err
 	}
-	var gh *github.Provider
+	var gh provider.Provider
+	var githubCredential provider.Credential
 	if config.Enabled(settings.GitHub.Enabled) {
 		gh = github.New(settings.GitHub, api)
-		token, err := gh.Token(ctx)
-		if err == nil {
-			err = gh.Verify(ctx, token)
-		}
+		githubCredential, err = gh.Acquire(ctx)
 		timer.Step("GitHub token")
 		if err != nil {
 			if githubSkipped = skippable(ctx, settings.GitHub.Optional, err); githubSkipped == "" {
@@ -204,7 +203,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 			}
 			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := gl.RevokeCreated(cleanup); err != nil {
+			if err := gl.Revoke(cleanup); err != nil {
 				if reaper != nil {
 					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the reaper retries it, see "+reaperLogPath()+".")
 				} else {
@@ -220,7 +219,12 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	}
 	sessionBroker := &broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
 	if gh != nil {
-		sessionBroker.GitHubToken = gh.Token
+		// The broker reads the state file on every request, as another
+		// session may rotate the token there.
+		sessionBroker.GitHubToken = func(ctx context.Context) (string, error) {
+			c, err := gh.Refresh(ctx, githubCredential)
+			return c.Secret, err
+		}
 	}
 	// Bind before creating a PAT: failure to create a socket must not mint a token.
 	server, err := startBroker(ctx, address, sessionBroker)
@@ -229,15 +233,14 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	}
 	defer server.close()
 	if gl != nil {
-		token, createErr := gl.Create(ctx, settings.Duration())
-		err = createErr
+		credential, err := gl.Acquire(ctx)
 		// Skipped only before a PAT exists: one that was minted is revoked at
 		// exit, which a skipped provider never needs.
-		if err != nil && len(gl.Created) == 0 {
+		if err != nil && !errors.As(err, new(provider.CreatedError)) {
 			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
 		}
 		sessionBroker.mu.Lock()
-		sessionBroker.GitLabToken = token
+		sessionBroker.GitLabToken = credential.Secret
 		sessionBroker.GitLabSkipped = gitlabSkipped
 		sessionBroker.mu.Unlock()
 		if err != nil && gitlabSkipped == "" {

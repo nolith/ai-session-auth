@@ -116,7 +116,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat gitla
 		logf("cannot load the configuration: %v", err)
 		return err
 	}
-	gl, err := gitlab.New(settings.GitLab, api.New(), nil)
+	gl, err := gitlab.New(settings.GitLab, settings.Duration(), api.New(), nil)
 	if err != nil {
 		logf("cannot prepare the issuer: %v", err)
 		return err

@@ -158,11 +158,11 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 		}
 	})
 	g := &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
-	token, err := g.Create(context.Background(), 24*time.Hour)
+	token, err := g.create(context.Background(), 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
-	if err = g.RevokeCreated(context.Background()); err != nil {
+	if err = g.Revoke(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !deleted || len(g.Created) != 0 {
@@ -179,7 +179,7 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 		return 200, answer
 	})
 	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.Create(context.Background(), time.Hour); err == nil || minted {
+	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}
 }
@@ -193,7 +193,7 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 		return 200, answer
 	})
 	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.Create(context.Background(), time.Hour); err == nil || minted {
+	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for another user")
 	}
 }
@@ -207,7 +207,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	for _, key := range glabUnset {
 		t.Setenv(key, "outer-secret")
 	}
-	g, err := New(testutil.GlabConfig(), nil, nil)
+	g, err := New(testutil.GlabConfig(), 24*time.Hour, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,11 +216,11 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	os.WriteFile(filepath.Join(decoy, "glab"), []byte("#!/bin/sh\nexit 1\n"), 0700)
 	t.Setenv("PATH", decoy+string(os.PathListSeparator)+path)
 	g.Now = func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }
-	token, err := g.Create(context.Background(), 24*time.Hour)
+	token, err := g.create(context.Background(), 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
-	if err = g.RevokeCreated(context.Background()); err != nil {
+	if err = g.Revoke(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	calls := testutil.Calls(t, dir)
@@ -388,7 +388,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		return 404, nil
 	})
 	g := &Provider{Config: testutil.NamespacedConfig(), Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if token, err := g.Create(context.Background(), time.Hour); err != nil || token != "session-secret" {
+	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
 	// The user and every namespace come from one document.
@@ -408,7 +408,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 	c := testutil.NamespacedConfig()
 	c.Groups, c.Projects = nil, nil
 	g = &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.Create(context.Background(), time.Hour); err != nil {
+	if _, err := g.create(context.Background(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := json.Marshal(scopes); string(got) != string(must(json.Marshal([]config.Scope{want[0], want[2]}))) {
@@ -438,7 +438,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		c := testutil.NamespacedConfig()
 		c.Groups, c.Projects = []string{"group"}, nil
 		g := &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-		if _, err := g.Create(context.Background(), time.Hour); err == nil || minted {
+		if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 			t.Errorf("%s: minted (err %v)", tc.name, err)
 		}
 	}

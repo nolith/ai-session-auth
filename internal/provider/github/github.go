@@ -14,6 +14,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -69,8 +70,48 @@ func (g *Provider) Verify(ctx context.Context, token string) error {
 	}
 	return nil
 }
-func (g *Provider) Token(ctx context.Context) (string, error) {
-	var token string
+
+var _ provider.Provider = (*Provider)(nil)
+
+// ID names the host; only github.com is configurable.
+func (g *Provider) ID() string   { return "github:github.com" }
+func (g *Provider) Kind() string { return "github" }
+
+// Acquire returns the App user token once GitHub confirms it is
+// expected_user's.
+func (g *Provider) Acquire(ctx context.Context) (provider.Credential, error) {
+	state, err := g.current(ctx)
+	if err != nil {
+		return provider.Credential{}, err
+	}
+	if err = g.Verify(ctx, state.AccessToken); err != nil {
+		return provider.Credential{}, err
+	}
+	return credential(state), nil
+}
+
+// Refresh reads the state file again, and rotates the token there once it is
+// five minutes from expiring: another session may have rotated it already.
+func (g *Provider) Refresh(ctx context.Context, _ provider.Credential) (provider.Credential, error) {
+	state, err := g.current(ctx)
+	if err != nil {
+		return provider.Credential{}, err
+	}
+	return credential(state), nil
+}
+
+// Revoke does nothing: an App user token expires on its own, and revoking it
+// would sign out every other session sharing the login.
+func (g *Provider) Revoke(ctx context.Context) error { return nil }
+
+func credential(state GitHubState) provider.Credential {
+	return provider.Credential{Secret: state.AccessToken, Expires: time.Unix(int64(state.ExpiresAt), 0)}
+}
+
+// current reads the state file under its lock, and rotates the token there
+// when it is about to expire.
+func (g *Provider) current(ctx context.Context) (GitHubState, error) {
+	var current GitHubState
 	err := secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
 		raw, err := secretfile.Read(g.Config.StateFile)
 		if errors.Is(err, os.ErrNotExist) {
@@ -107,10 +148,10 @@ func (g *Provider) Token(ctx context.Context) (string, error) {
 				return err
 			}
 		}
-		token = state.AccessToken
+		current = state
 		return nil
 	})
-	return token, err
+	return current, err
 }
 func (g *Provider) Login(ctx context.Context, output io.Writer) error {
 	return secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
