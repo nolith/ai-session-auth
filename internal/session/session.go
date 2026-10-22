@@ -18,6 +18,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
@@ -181,7 +182,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	var githubCredential provider.Credential
 	if config.Enabled(settings.GitHub.Enabled) {
 		gh = github.New(settings.GitHub, api)
-		githubCredential, err = gh.Acquire(ctx)
+		githubCredential, err = gh.Acquire(ctx, nil)
 		timer.Step("GitHub token")
 		if err != nil {
 			if githubSkipped = skippable(ctx, settings.GitHub.Optional, err); githubSkipped == "" {
@@ -193,17 +194,23 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	}
 	// The reaper's pipe: closed without "revoked", it revokes the PAT itself.
 	var reaper *os.File
+	var book *ledger.Ledger
 	if gl != nil {
 		defer func() {
 			if reaper != nil {
 				defer reaper.Close()
 			}
 			if len(gl.Created) == 0 {
+				if book != nil {
+					book.Remove()
+				}
 				return
 			}
 			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := gl.Revoke(cleanup); err != nil {
+				// The ledger stays: it names what is left to revoke.
+				book.Close()
 				if reaper != nil {
 					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the reaper retries it, see "+reaperLogPath()+".")
 				} else {
@@ -214,6 +221,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 			if reaper != nil {
 				reaper.WriteString(reaperDone)
 			}
+			book.Remove()
 			fmt.Fprintln(output, "GitLab session PAT revoked.")
 		}()
 	}
@@ -233,7 +241,14 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	}
 	defer server.close()
 	if gl != nil {
-		credential, err := gl.Acquire(ctx)
+		id, err := ledger.NewID(time.Now())
+		if err != nil {
+			return 1, err
+		}
+		if book, err = ledger.Create(id); err != nil {
+			return 1, err
+		}
+		credential, err := gl.Acquire(ctx, book)
 		// Skipped only before a PAT exists: one that was minted is revoked at
 		// exit, which a skipped provider never needs.
 		if err != nil && !errors.As(err, new(provider.CreatedError)) {

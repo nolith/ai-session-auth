@@ -14,6 +14,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
@@ -79,7 +80,8 @@ func (g *Provider) Kind() string { return "github" }
 
 // Acquire returns the App user token once GitHub confirms it is
 // expected_user's.
-func (g *Provider) Acquire(ctx context.Context) (provider.Credential, error) {
+// Nothing is revocable, so nothing goes in the ledger.
+func (g *Provider) Acquire(ctx context.Context, _ *ledger.Ledger) (provider.Credential, error) {
 	state, err := g.current(ctx)
 	if err != nil {
 		return provider.Credential{}, err

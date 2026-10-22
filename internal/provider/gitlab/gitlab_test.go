@@ -16,6 +16,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -66,6 +67,22 @@ func lookupAnswers(t *testing.T, query, user string, answers map[string]any, ids
 		data["l0"] = map[string]any{"nodes": ids}
 	}
 	return data
+}
+
+// testLedger is a new session's ledger in a temporary state directory.
+func testLedger(t *testing.T) *ledger.Ledger {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	id, err := ledger.NewID(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := ledger.Create(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l
 }
 
 // mintAnswer is what GitLab answers to personalAccessTokenCreate.
@@ -119,6 +136,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 	c := testutil.Config().GitLab
 	name := ""
 	deleted := false
+	book := testLedger(t)
 	// The earlier format resolves its project IDs, then checks the paths.
 	ids := []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}}
 	api := mockAPI(t, func(r *http.Request) (int, any) {
@@ -148,6 +166,10 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 			if !strings.HasPrefix(name, "geas-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 {
 				t.Error("bad PAT input")
 			}
+			// The name is on disk before the mint, without an ID yet.
+			if entries, err := book.Entries(); err != nil || len(entries) != 1 || entries[0] != (ledger.Entry{Provider: "gitlab:gitlab.com", Name: name, Created: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}) {
+				t.Errorf("ledger at the mint: %+v %v", entries, err)
+			}
 			return 200, answer
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v4/personal_access_tokens/42":
 			deleted = true
@@ -158,9 +180,12 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 		}
 	})
 	g := &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
-	token, err := g.create(context.Background(), 24*time.Hour)
+	token, err := g.create(context.Background(), book, 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
+	}
+	if entries, err := book.Entries(); err != nil || len(entries) != 1 || entries[0].Name != name || entries[0].ID != 42 || entries[0].Revoked {
+		t.Fatalf("ledger after the id lookup: %+v %v", entries, err)
 	}
 	if err = g.Revoke(context.Background()); err != nil {
 		t.Fatal(err)
@@ -172,6 +197,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 
 func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 	minted := false
+	book := testLedger(t)
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
@@ -179,13 +205,14 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 		return 200, answer
 	})
 	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
+	if _, err := g.create(context.Background(), book, time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}
 }
 
 func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 	minted := false
+	book := testLedger(t)
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
@@ -193,7 +220,7 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 		return 200, answer
 	})
 	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
+	if _, err := g.create(context.Background(), book, time.Hour); err == nil || minted {
 		t.Fatal("minted for another user")
 	}
 }
@@ -211,12 +238,14 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// After New, which has the lock's path already.
+	book := testLedger(t)
 	// A glab found on PATH later, such as a session wrapper, must not be used.
 	decoy := t.TempDir()
 	os.WriteFile(filepath.Join(decoy, "glab"), []byte("#!/bin/sh\nexit 1\n"), 0700)
 	t.Setenv("PATH", decoy+string(os.PathListSeparator)+path)
 	g.Now = func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }
-	token, err := g.create(context.Background(), 24*time.Hour)
+	token, err := g.create(context.Background(), book, 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
@@ -355,6 +384,7 @@ func TestLookupDocument(t *testing.T) {
 
 func TestGitLabNamespacedScopes(t *testing.T) {
 	var scopes []config.Scope
+	book := testLedger(t)
 	lookups := 0
 	answers := map[string]any{
 		"group":             map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "group"},
@@ -388,7 +418,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		return 404, nil
 	})
 	g := &Provider{Config: testutil.NamespacedConfig(), Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
+	if token, err := g.create(context.Background(), book, time.Hour); err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
 	// The user and every namespace come from one document.
@@ -408,7 +438,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 	c := testutil.NamespacedConfig()
 	c.Groups, c.Projects = nil, nil
 	g = &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-	if _, err := g.create(context.Background(), time.Hour); err != nil {
+	if _, err := g.create(context.Background(), book, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := json.Marshal(scopes); string(got) != string(must(json.Marshal([]config.Scope{want[0], want[2]}))) {
@@ -429,6 +459,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		{"missing path", nil},
 	} {
 		minted := false
+		book := testLedger(t)
 		api := mockAPI(t, func(r *http.Request) (int, any) {
 			query, _ := graphqlPayload(t, r)
 			var answer any
@@ -438,8 +469,11 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		c := testutil.NamespacedConfig()
 		c.Groups, c.Projects = []string{"group"}, nil
 		g := &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
-		if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
+		if _, err := g.create(context.Background(), book, time.Hour); err == nil || minted {
 			t.Errorf("%s: minted (err %v)", tc.name, err)
+		}
+		if entries, err := book.Entries(); err != nil || len(entries) != 0 {
+			t.Errorf("%s: a refused lookup reached the ledger: %+v %v", tc.name, entries, err)
 		}
 	}
 }

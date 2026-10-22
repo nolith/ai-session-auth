@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"time"
+
+	"github.com/nolith/geas/internal/ledger"
 )
 
 // A Provider is one credential source for one host, e.g. GitLab on
@@ -16,8 +18,9 @@ type Provider interface {
 	ID() string
 	// Kind groups providers of one kind: "gitlab", "github".
 	Kind() string
-	// Acquire returns the credential.
-	Acquire(ctx context.Context) (Credential, error)
+	// Acquire returns the credential. Anything revocable is recorded in the
+	// ledger before the call that creates it.
+	Acquire(ctx context.Context, l *ledger.Ledger) (Credential, error)
 	// Refresh returns a replacement before Credential.Expires, or the same
 	// credential when it never expires within the session.
 	Refresh(ctx context.Context, c Credential) (Credential, error)

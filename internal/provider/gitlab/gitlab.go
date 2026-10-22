@@ -20,6 +20,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/secretfile"
@@ -179,9 +180,10 @@ func (g *Provider) ID() string   { return "gitlab:gitlab.com" }
 func (g *Provider) Kind() string { return "gitlab" }
 
 // Acquire mints the session PAT and resolves its ID, so that the exit needs a
-// single DELETE.
-func (g *Provider) Acquire(ctx context.Context) (provider.Credential, error) {
-	token, err := g.create(ctx, g.Duration)
+// single DELETE. The PAT's name is in the ledger before the mint, and its ID
+// once it is resolved.
+func (g *Provider) Acquire(ctx context.Context, l *ledger.Ledger) (provider.Credential, error) {
+	token, err := g.create(ctx, l, g.Duration)
 	if err != nil {
 		return provider.Credential{}, err
 	}
@@ -197,7 +199,7 @@ func (g *Provider) Refresh(ctx context.Context, c provider.Credential) (provider
 	return c, nil
 }
 
-func (g *Provider) create(ctx context.Context, duration time.Duration) (string, error) {
+func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.Duration) (string, error) {
 	if err := config.ValidateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
@@ -218,6 +220,12 @@ func (g *Provider) create(ctx context.Context, duration time.Duration) (string, 
 		return "", err
 	}
 	name := "geas-" + hex.EncodeToString(random)
+	// The mutation returns no ID: with the name on disk first, a session that
+	// dies before it resolves the ID still leaves the reaper a PAT to find.
+	entry := ledger.Entry{Provider: g.ID(), Name: name, Created: g.Now().UTC()}
+	if err := l.Record(entry); err != nil {
+		return "", err
+	}
 	variables := map[string]any{"input": map[string]any{
 		"name": name, "expiresAt": config.ExpiryForDuration(g.Now(), duration), "granularScopes": scopes,
 	}}
@@ -246,6 +254,10 @@ func (g *Provider) create(ctx context.Context, duration time.Duration) (string, 
 		return "", provider.CreatedError{Err: err}
 	}
 	g.Created[len(g.Created)-1].ID = id
+	entry.ID = id
+	if err := l.Record(entry); err != nil {
+		return "", provider.CreatedError{Err: err}
+	}
 	return result.Data.Create.Token, nil
 }
 
