@@ -48,3 +48,39 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("git host %+v", g)
 	}
 }
+
+// gh's directory follows gh's own resolution: each override, then
+// ~/.config/gh on macOS as on Linux.
+func TestGhConfigDir(t *testing.T) {
+	home := func() (string, error) { return "/home/alice", nil }
+	for _, tc := range []struct {
+		env  map[string]string
+		want string
+	}{
+		{map[string]string{"GH_CONFIG_DIR": "/elsewhere/gh", "XDG_CONFIG_HOME": "/xdg"}, "/elsewhere/gh"},
+		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, "/xdg/gh"},
+		{nil, "/home/alice/.config/gh"},
+	} {
+		got, err := ghConfigDir(func(name string) string { return tc.env[name] }, home)
+		if err != nil || got != tc.want {
+			t.Errorf("%v: %q %v", tc.env, got, err)
+		}
+	}
+}
+
+func TestProtect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GH_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	c := testutil.Config().GitHub
+	c.StateFile = "/state/geas/github.json"
+	got := New(c, nil).Setup().Protect
+	if len(got) != 3 || got[0] != "/state/geas/github.json" || got[1] != "/state/geas/github.json.lock" || got[2] != filepath.Join(home, ".config", "gh") {
+		t.Fatalf("%q", got)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "/xdg")
+	if got := New(c, nil).Setup().Protect; got[2] != "/xdg/gh" {
+		t.Fatalf("%q", got)
+	}
+}

@@ -290,6 +290,10 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		dir.Remove()
 		return 1, err
 	}
+	if err = writeSandbox(dir, providers); err != nil {
+		dir.Remove()
+		return 1, err
+	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
 	directory, err := os.MkdirTemp("/tmp", "geas-")
 	if err != nil {

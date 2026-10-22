@@ -54,6 +54,12 @@ type Setup struct {
 	Env map[string]string
 	// Git lists the hosts git reaches over HTTPS with this provider's token.
 	Git []GitHost
+	// Protect lists the user's own credential files and directories that
+	// the agent must never read: the issuer login, refresh tokens. Resolved
+	// the way the tool itself resolves them at run time (environment
+	// overrides first, then the OS default), from the user's environment,
+	// never hard-coded, so that the sandbox follows the tool.
+	Protect []string
 }
 
 // GitHost is all the session gitconfig and the credential helper need to

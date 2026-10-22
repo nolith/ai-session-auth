@@ -233,7 +233,9 @@ printf 'glab=%s\n' "$GLAB_CONFIG_DIR"
 printf 'secret=%s\n' "$(cat "$GEAS_SESSION_DIR/secrets/gitlab:gitlab.com")"
 printf 'marker=%s\n' "$(cat "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com")"
 grep -c 'token: "session-secret"' "$GLAB_CONFIG_DIR/config.yml"
-ls -ld "$GEAS_SESSION_DIR" "$GLAB_CONFIG_DIR/config.yml" | cut -c1-10`)
+ls -ld "$GEAS_SESSION_DIR" "$GLAB_CONFIG_DIR/config.yml" | cut -c1-10
+printf 'profile=%s\n' "$GEAS_SANDBOX_PROFILE"
+grep -c '"bypass_protection"' "$GEAS_SANDBOX_PROFILE"`)
 	raw, _ := io.ReadAll(s.output)
 	s.wait(t)
 	output := string(raw)
@@ -242,7 +244,7 @@ ls -ld "$GEAS_SESSION_DIR" "$GLAB_CONFIG_DIR/config.yml" | cut -c1-10`)
 		t.Fatalf("session directories left: %v", left)
 	}
 	dir := filepath.Join(s.state, "geas", "sessions")
-	for _, want := range []string{"\ndir=" + dir + "/", "\nglab=" + dir + "/", "/glab\n", "\nsecret=session-secret\n", `marker={"state":"ready"`, "\n1\n", "drwx------\n-rw-------\n"} {
+	for _, want := range []string{"\ndir=" + dir + "/", "\nglab=" + dir + "/", "/glab\n", "\nsecret=session-secret\n", `marker={"state":"ready"`, "\n1\n", "drwx------\n-rw-------\n", "/sandbox/nono.json\n1\n"} {
 		if !strings.Contains("\n"+output, want) {
 			t.Errorf("harness output lacks %q:\n%s", want, output)
 		}

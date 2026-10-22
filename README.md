@@ -347,6 +347,19 @@ the real `glab` with your login, by path or without the session's
 a sandbox that hides those paths, or an external broker. The session socket
 intentionally provides access to the temporary tokens.
 
+Each session writes the paths a sandbox around the harness must protect into
+its directory: `sandbox/policy.json` lists them neutrally, `deny` (your glab
+and gh logins, a stored issuer PAT, the GitHub App state and its lock, and
+`$XDG_STATE_HOME/geas` as a whole), `read` and `reopen` (the session's own
+directory, inside the denied state directory), and `sandbox/nono.json` is the
+same as a [nono](https://github.com/nolabs-ai/nono) profile fragment with
+`filesystem.deny`, `read` and `bypass_protection`, and no `extends`: the
+launcher that runs nono names its own base profile. `GEAS_SANDBOX_PROFILE`
+holds the fragment's path. geas resolves each tool's directory as the tool
+does: `GLAB_CONFIG_DIR`, else `$XDG_CONFIG_HOME/glab-cli`, else the OS's user
+configuration directory (`~/Library/Application Support/glab-cli` on
+macOS); `GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`.
+
 The credential helper's allowlist controls where the helper returns tokens;
 it does not restrict the CLIs' API calls. GitLab enforces the group and
 project boundaries through the token's granular scopes. GitHub enforces the

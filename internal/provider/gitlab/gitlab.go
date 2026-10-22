@@ -183,27 +183,54 @@ func (g *Provider) ID() string   { return "gitlab:" + host }
 func (g *Provider) Kind() string { return "gitlab" }
 
 // Setup points glab at the session's config.yml, which Renderer writes, and
-// git at the session PAT for the allowlisted namespaces.
+// git at the session PAT for the allowlisted namespaces. It protects the
+// user's own glab login and a stored issuer PAT.
 func (g *Provider) Setup() provider.Setup {
 	namespaces := slices.Clone(g.Config.Groups)
 	if g.Config.PersonalProjects {
 		namespaces = append(namespaces, g.Config.ExpectedUser)
 	}
+	var protect []string
+	if dir, err := glabConfigDir(os.Getenv, os.UserConfigDir); err == nil {
+		protect = append(protect, dir)
+	}
+	if g.Config.IssuerTokenFile != "" {
+		protect = append(protect, g.Config.IssuerTokenFile)
+	}
 	return provider.Setup{
 		Env: map[string]string{"GLAB_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir},
 		Git: []provider.GitHost{{
-			Host:     host,
-			Username: "oauth2",
-			// The earlier format's repositories, or the projects.
-			Namespaces:   namespaces,
+			Host:       host,
+			Username:   "oauth2",
+			Namespaces: namespaces,
+			// The projects, or the earlier format's repositories.
 			Repositories: append(slices.Clone(g.Config.Projects), g.Config.Repositories...),
 		}},
+		Protect: protect,
 	}
 }
 
 // Acquire mints the session PAT and resolves its ID, so that the exit needs a
 // single DELETE. The PAT's name is in the ledger before the mint, and its ID
 // once it is resolved.
+// glabConfigDir is where glab keeps the user's login, resolved as glab
+// resolves it: GLAB_CONFIG_DIR, else $XDG_CONFIG_HOME/glab-cli, else the OS's
+// user configuration directory, which on macOS is
+// ~/Library/Application Support/glab-cli.
+func glabConfigDir(getenv func(string) string, userConfigDir func() (string, error)) (string, error) {
+	if dir := getenv("GLAB_CONFIG_DIR"); dir != "" {
+		return filepath.Abs(dir)
+	}
+	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Abs(filepath.Join(xdg, "glab-cli"))
+	}
+	base, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "glab-cli"), nil
+}
+
 func (g *Provider) Acquire(ctx context.Context, l *ledger.Ledger) (provider.Credential, error) {
 	token, err := g.create(ctx, l, g.Duration)
 	if err != nil {

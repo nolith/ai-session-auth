@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,8 @@ import (
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
+	"github.com/nolith/geas/internal/sandbox"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -59,7 +62,7 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := procenv.Map(values)
-	if env["GEAS_SESSION_DIR"] != session.Path() || env["GLAB_CONFIG_DIR"] != session.Path()+"/glab" || env["GIT_TERMINAL_PROMPT"] != "0" {
+	if env["GEAS_SESSION_DIR"] != session.Path() || env["GLAB_CONFIG_DIR"] != session.Path()+"/glab" || env["GIT_TERMINAL_PROMPT"] != "0" || env["GEAS_SANDBOX_PROFILE"] != session.Path()+"/sandbox/nono.json" {
 		t.Fatalf("session variables: %v", env)
 	}
 	for _, key := range []string{"GH_TOKEN", "GITLAB_TOKEN", "SSH_AUTH_SOCK"} {
@@ -322,5 +325,29 @@ func TestProviderEnv(t *testing.T) {
 		if sessionVariable(name) {
 			t.Errorf("%s is the session's", name)
 		}
+	}
+}
+
+// The policy denies what the providers protect and geas's state as a whole,
+// and re-opens the session's directory; the nono fragment says the same.
+func TestWriteSandbox(t *testing.T) {
+	session := testutil.SessionDir(t)
+	t.Setenv("GLAB_CONFIG_DIR", "/elsewhere/glab")
+	t.Setenv("GH_CONFIG_DIR", "/elsewhere/gh")
+	c := testutil.Config()
+	c.GitHub.StateFile = "/state/github.json"
+	c.GitLab.IssuerTokenFile = "/state/issuer.txt"
+	if err := writeSandbox(session, []provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := secretfile.StateDirectory()
+	policy, err := sandbox.Load(session)
+	want := []string{"/elsewhere/glab", "/state/issuer.txt", "/state/github.json", "/state/github.json.lock", "/elsewhere/gh", state}
+	if err != nil || !slices.Equal(policy.Deny, want) || !slices.Equal(policy.Read, []string{session.Path()}) || !slices.Equal(policy.Reopen, []string{session.Path()}) {
+		t.Fatalf("%+v %v", policy, err)
+	}
+	raw, err := session.ReadFile("sandbox/nono.json")
+	if err != nil || !strings.Contains(string(raw), `"bypass_protection": [`) || strings.Contains(string(raw), "extends") {
+		t.Fatalf("%s %v", raw, err)
 	}
 }

@@ -25,14 +25,15 @@ dependencies outside the standard library.
                                config.yml renderer
     internal/provider/github/  GitHub App tokens: state file, refresh, the gh
                                hosts.yml renderer
-    internal/testutil/         test fixtures, fakes and the fake glab/gh scripts
+    internal/sandbox/          the sandbox policy the providers' protected paths make
+    internal/sandbox/nono/     renders that policy as a nono profile fragment
+    internal/testutil/         test fixtures, fakes, golden files and the fake glab/gh scripts
 
 Later phases add the rest of the end state:
 
     internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
     internal/sshgrant/         the human side: grant, show, drop, enroll, list-cas
-    internal/sandbox/          the sandbox policy a provider declares, `geas sandbox check`
-    internal/sandbox/nono/     renders that policy as a nono profile fragment
+    internal/sandbox/          `geas sandbox check`
     nix/ scripts/ skills/      packaging and skills, with the ssh work
 
 ## Rules

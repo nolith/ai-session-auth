@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -84,8 +85,13 @@ func (g *Provider) Kind() string { return "github" }
 
 // Setup points gh at the session's hosts.yml, which Renderer writes, never
 // prompting, and git at the App token for the allowlisted owners and
-// repositories, in any letter case, as GitHub compares names.
+// repositories, in any letter case, as GitHub compares names. It protects
+// the App login's state file, its lock, and the user's own gh login.
 func (g *Provider) Setup() provider.Setup {
+	protect := []string{g.Config.StateFile, g.Config.StateFile + ".lock"}
+	if dir, err := ghConfigDir(os.Getenv, os.UserHomeDir); err == nil {
+		protect = append(protect, dir)
+	}
 	return provider.Setup{
 		Env: map[string]string{"GH_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir, "GH_PROMPT_DISABLED": "1"},
 		Git: []provider.GitHost{{
@@ -95,7 +101,25 @@ func (g *Provider) Setup() provider.Setup {
 			Repositories: slices.Clone(g.Config.Repositories),
 			FoldCase:     true,
 		}},
+		Protect: protect,
 	}
+}
+
+// ghConfigDir is where gh keeps the user's login, resolved as gh resolves
+// it: GH_CONFIG_DIR, else $XDG_CONFIG_HOME/gh, else ~/.config/gh, on macOS
+// too.
+func ghConfigDir(getenv func(string) string, home func() (string, error)) (string, error) {
+	if dir := getenv("GH_CONFIG_DIR"); dir != "" {
+		return filepath.Abs(dir)
+	}
+	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Abs(filepath.Join(xdg, "gh"))
+	}
+	base, err := home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, ".config", "gh"), nil
 }
 
 // Acquire returns the App user token once GitHub confirms it is

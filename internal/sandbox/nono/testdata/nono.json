@@ -1,0 +1,15 @@
+{
+  "filesystem": {
+    "deny": [
+      "/home/alice/Library/Application Support/glab-cli",
+      "/home/alice/.config/gh",
+      "/home/alice/.local/state/geas"
+    ],
+    "read": [
+      "/home/alice/.local/state/geas/sessions/20261022T213405Z-1f0c2a9b3e4d5c6a"
+    ],
+    "bypass_protection": [
+      "/home/alice/.local/state/geas/sessions/20261022T213405Z-1f0c2a9b3e4d5c6a"
+    ]
+  }
+}

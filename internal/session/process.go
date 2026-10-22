@@ -14,6 +14,10 @@ import (
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/provider"
+	"github.com/nolith/geas/internal/sandbox"
+	"github.com/nolith/geas/internal/sandbox/nono"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/sessiondir"
 )
 
@@ -77,6 +81,7 @@ func sessionEnvironment(settings config.Config, directory, address, binary strin
 	env["GEAS_SOCKET"] = address
 	maps.Copy(env, exported)
 	env["GEAS_SESSION_DIR"] = dir.Path()
+	env["GEAS_SANDBOX_PROFILE"] = filepath.Join(dir.Path(), nono.ProfileFile)
 	env["GIT_TERMINAL_PROMPT"] = "0"
 	// Last, after anything inherited: the session's gitconfig wins.
 	if err := appendGitConfig(env, [][2]string{{"include.path", filepath.Join(dir.Path(), sessiondir.GitConfigFile)}}); err != nil {
@@ -100,6 +105,21 @@ func writeGitConfig(dir *sessiondir.Dir, binary string, hosts []credhelper.Host)
 		return err
 	}
 	return credhelper.WriteHosts(dir, hosts)
+}
+
+// writeSandbox writes the session's sandbox policy, from what the providers
+// protect, and the nono fragment a launcher's sandbox applies.
+func writeSandbox(dir *sessiondir.Dir, providers []provider.Provider) error {
+	state, err := secretfile.StateDirectory()
+	if err != nil {
+		return err
+	}
+	policy := sandbox.Merge(providers, state, dir.Path())
+	if err = policy.Write(dir); err != nil {
+		return err
+	}
+	_, err = nono.Write(dir, policy)
+	return err
 }
 
 // proxyMark is set for the real CLI and everything it starts. Entering the

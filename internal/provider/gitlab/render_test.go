@@ -3,6 +3,7 @@ package gitlab
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -59,5 +60,51 @@ func TestSetup(t *testing.T) {
 	p = &Provider{Config: testutil.Config().GitLab}
 	if g := p.Setup().Git[0]; len(g.Namespaces) != 0 || len(g.Repositories) != 1 || g.Repositories[0] != "group/project" {
 		t.Fatalf("earlier format: %+v", g)
+	}
+}
+
+// glab's directory follows glab's own resolution: each override, then the
+// OS default, which differs between macOS and Linux.
+func TestGlabConfigDir(t *testing.T) {
+	darwin := func() (string, error) { return "/Users/alice/Library/Application Support", nil }
+	linux := func() (string, error) { return "/home/alice/.config", nil }
+	for _, tc := range []struct {
+		env         map[string]string
+		configDir   func() (string, error)
+		want        string
+		description string
+	}{
+		{map[string]string{"GLAB_CONFIG_DIR": "/elsewhere/glab", "XDG_CONFIG_HOME": "/xdg"}, darwin, "/elsewhere/glab", "GLAB_CONFIG_DIR"},
+		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, darwin, "/xdg/glab-cli", "XDG_CONFIG_HOME on macOS"},
+		{map[string]string{"XDG_CONFIG_HOME": "/xdg"}, linux, "/xdg/glab-cli", "XDG_CONFIG_HOME on Linux"},
+		{nil, darwin, "/Users/alice/Library/Application Support/glab-cli", "macOS default"},
+		{nil, linux, "/home/alice/.config/glab-cli", "Linux default"},
+	} {
+		got, err := glabConfigDir(func(name string) string { return tc.env[name] }, tc.configDir)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: %q %v", tc.description, got, err)
+		}
+	}
+}
+
+// Setup resolves from the environment geas runs in, before the session's
+// own GLAB_CONFIG_DIR exists, and adds a stored issuer PAT.
+func TestProtect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GLAB_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	want := filepath.Join(home, ".config", "glab-cli")
+	if runtime.GOOS == "darwin" {
+		want = filepath.Join(home, "Library", "Application Support", "glab-cli")
+	}
+	if got := (&Provider{Config: testutil.GlabConfig()}).Setup().Protect; len(got) != 1 || got[0] != want {
+		t.Fatalf("glab issuer: %q, want %q", got, want)
+	}
+	t.Setenv("GLAB_CONFIG_DIR", "/elsewhere/glab")
+	c := testutil.Config().GitLab
+	c.IssuerTokenFile = "/state/issuer.txt"
+	if got := (&Provider{Config: c}).Setup().Protect; len(got) != 2 || got[0] != "/elsewhere/glab" || got[1] != "/state/issuer.txt" {
+		t.Fatalf("bearer issuer: %q", got)
 	}
 }
