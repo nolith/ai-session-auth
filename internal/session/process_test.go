@@ -141,6 +141,14 @@ func TestProviderEnv(t *testing.T) {
 	if err != nil || len(env) != 3 || env["GLAB_CONFIG_DIR"] != "/state/geas/sessions/x/glab" || env["GH_CONFIG_DIR"] != "/state/geas/sessions/x/gh" || env["GH_PROMPT_DISABLED"] != "1" {
 		t.Fatalf("%v %v", env, err)
 	}
+	// Every GitLab instance sets GLAB_CONFIG_DIR alike: glab keeps every
+	// host in one config.yml.
+	second := testutil.GitLab()
+	second.Host = "gitlab.example.com"
+	providers = append(providers, &gitlab.Provider{Config: second})
+	if env, err = providerEnv(providers, "/state/geas/sessions/x"); err != nil || len(env) != 3 || env["GLAB_CONFIG_DIR"] != "/state/geas/sessions/x/glab" {
+		t.Fatalf("two instances: %v %v", env, err)
+	}
 	for _, name := range []string{"GEAS_SESSION_DIR", "GEAS_SANDBOX_PROFILE", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG"} {
 		if !sessionVariable(name) {
 			t.Errorf("%s is not the session's", name)

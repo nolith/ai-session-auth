@@ -39,24 +39,28 @@ type issuer interface {
 	graphql(ctx context.Context, query string, variables map[string]any, out any) error
 }
 
-// bearerIssuer sends the requests itself, with the PAT from issuer_token_file.
+// bearerIssuer sends the requests itself, to https://<host>, with the PAT
+// from the issuer's token_file.
 type bearerIssuer struct {
 	client *api.API
+	host   string
 	token  string
 }
 
 // The issuer's REST calls are all GET or DELETE, so they carry no body.
 func (b bearerIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
-	return b.client.Request(ctx, method, b.client.GitLabURL+"/api/v4/"+endpoint, b.token, nil, false, out)
+	return b.client.Request(ctx, method, "https://"+b.host+"/api/v4/"+endpoint, b.token, nil, false, out)
 }
 func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
 	payload := map[string]any{"query": query, "variables": variables}
-	return b.client.Request(ctx, http.MethodPost, b.client.GitLabURL+"/api/graphql", b.token, payload, false, out)
+	return b.client.Request(ctx, http.MethodPost, "https://"+b.host+"/api/graphql", b.token, payload, false, out)
 }
 
-// glabIssuer delegates to the user's own glab login, which renews its OAuth
-// token itself, so revocation still works hours after the session started.
+// glabIssuer delegates to the user's own glab login for its host, which
+// renews its OAuth token itself, so revocation still works hours after the
+// session started.
 type glabIssuer struct {
+	host       string
 	executable string // absolute, resolved once, at the start
 	// lockPath is the same for every host and every session, with ".lock"
 	// added: glab keeps all hosts in one config.yml, so one call at a time,
@@ -64,12 +68,12 @@ type glabIssuer struct {
 	lockPath string
 }
 
-// glabUnset keeps the issuer on the user's own gitlab.com login: no token or
+// glabUnset keeps the issuer on the user's own login for its host: no token or
 // session configuration from an enclosing session, no host override, and no
 // HTTP debugging, which prints credentials.
 var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
-func newGlabIssuer() (glabIssuer, error) {
+func newGlabIssuer(host string) (glabIssuer, error) {
 	executable, err := exec.LookPath("glab")
 	if err != nil {
 		return glabIssuer{}, errors.New("install glab and add it to PATH")
@@ -81,7 +85,7 @@ func newGlabIssuer() (glabIssuer, error) {
 	if err != nil {
 		return glabIssuer{}, err
 	}
-	return glabIssuer{executable: executable, lockPath: filepath.Join(state, "glab")}, nil
+	return glabIssuer{host: host, executable: executable, lockPath: filepath.Join(state, "glab")}, nil
 }
 func (g glabIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
 	return g.run(ctx, out, "--method", method, endpoint)
@@ -107,7 +111,7 @@ func (g glabIssuer) graphql(ctx context.Context, query string, variables map[str
 }
 func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	// Pinned: otherwise glab picks the host from the cwd's remote.
-	args = append([]string{"api", "--hostname", host}, args...)
+	args = append([]string{"api", "--hostname", g.host}, args...)
 	return secretfile.HoldFileLock(ctx, g.lockPath, func(lock *os.File) error {
 		// A locked keychain must fail the request, not hang the session.
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -165,7 +169,7 @@ type Provider struct {
 // duration. It reads the issuer's credential, or finds glab, but calls nothing.
 func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *timing.Timer) (*Provider, error) {
 	if host.Issuer.Type == "glab" {
-		glab, err := newGlabIssuer()
+		glab, err := newGlabIssuer(host.Host)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +183,7 @@ func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *ti
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &Provider{Config: host, Issuer: bearerIssuer{client: a, token: token}, Duration: duration, Now: time.Now, Steps: steps}, nil
+	return &Provider{Config: host, Issuer: bearerIssuer{client: a, host: host.Host, token: token}, Duration: duration, Now: time.Now, Steps: steps}, nil
 }
 
 var (
@@ -187,11 +191,8 @@ var (
 	_ provider.Settler  = (*Provider)(nil)
 )
 
-// host is the instance; only gitlab.com is configurable so far.
-const host = "gitlab.com"
-
-// ID names the instance.
-func (g *Provider) ID() string   { return "gitlab:" + host }
+// ID names the instance, e.g. gitlab:ops.gitlab.net.
+func (g *Provider) ID() string   { return "gitlab:" + g.Config.Host }
 func (g *Provider) Kind() string { return "gitlab" }
 
 // Setup points glab at the session's config.yml, which Renderer writes, and
@@ -212,7 +213,7 @@ func (g *Provider) Setup() provider.Setup {
 	return provider.Setup{
 		Env: map[string]string{"GLAB_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir},
 		Git: []provider.GitHost{{
-			Host:         host,
+			Host:         g.Config.Host,
 			Username:     "oauth2",
 			Namespaces:   namespaces,
 			Repositories: slices.Clone(g.Config.Projects),

@@ -623,3 +623,81 @@ func TestRevokeFromLedger(t *testing.T) {
 		}
 	}
 }
+
+// A second instance through the bearer issuer: every request goes to
+// https://<host>, with that instance's issuer PAT, and the ledger names the
+// instance's provider.
+func TestBearerIssuerUsesItsHost(t *testing.T) {
+	dir := t.TempDir()
+	issuer := filepath.Join(dir, "issuer.txt")
+	if err := os.WriteFile(issuer, []byte("ops-issuer\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := testutil.GitLab()
+	c.Host, c.Issuer.TokenFile = "gitlab.example.com", issuer
+	answers := map[string]any{"group/project": map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}}
+	deleted := false
+	a := mockAPI(t, func(r *http.Request) (int, any) {
+		if r.URL.Scheme != "https" || r.URL.Host != "gitlab.example.com" || r.Header.Get("Authorization") != "Bearer ops-issuer" {
+			t.Errorf("request to %s with %q", r.URL, r.Header.Get("Authorization"))
+		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v4/personal_access_tokens/42" {
+			deleted = true
+			return 204, nil
+		}
+		query, _ := graphqlPayload(t, r)
+		_, answer := issuerAnswer(t, query, "alice", answers)
+		return 200, answer
+	})
+	g, err := New(c, time.Hour, a, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.ID() != "gitlab:gitlab.example.com" || g.Setup().Git[0].Host != "gitlab.example.com" {
+		t.Fatalf("ID %s, Git %+v", g.ID(), g.Setup().Git)
+	}
+	book := testLedger(t)
+	if _, err = g.Acquire(context.Background(), book); err != nil {
+		t.Fatal(err)
+	}
+	if err = g.Settle(context.Background(), book); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := book.Entries()
+	if err != nil || len(entries) != 1 || entries[0].Provider != "gitlab:gitlab.example.com" || entries[0].ID != 42 {
+		t.Fatalf("ledger: %+v %v", entries, err)
+	}
+	if err = g.Revoke(context.Background(), entries[0]); err != nil || !deleted {
+		t.Fatalf("revoke: %v, deleted %v", err, deleted)
+	}
+}
+
+// The glab issuer pins every call to its own host, so each instance uses
+// the user's own glab login for that host, through the one shared lock.
+func TestGlabIssuerPinsItsHost(t *testing.T) {
+	dir := testutil.FakeGlab(t)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var providers []*Provider
+	for _, host := range []string{"gitlab.com", "gitlab.example.com"} {
+		c := testutil.GlabConfig()
+		c.Host = host
+		g, err := New(c, time.Hour, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		providers = append(providers, g)
+	}
+	if providers[0].Issuer.(glabIssuer).lockPath != providers[1].Issuer.(glabIssuer).lockPath {
+		t.Fatal("the instances lock separately")
+	}
+	for _, g := range providers {
+		if _, err := g.lookup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := testutil.Calls(t, dir)
+	if len(calls) != 2 || !slices.Equal(calls[0][:3], []string{"api", "--hostname", "gitlab.com"}) || !slices.Equal(calls[1][:3], []string{"api", "--hostname", "gitlab.example.com"}) {
+		t.Fatalf("calls: %q", calls)
+	}
+}

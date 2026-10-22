@@ -16,7 +16,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+
 	"strings"
 	"time"
 )
@@ -403,9 +405,14 @@ func validateGitHub(g GitHubConfig) error {
 	return nil
 }
 
+// hostname is what a provider's host may look like: a DNS name in lower
+// case, without a port, as it appears in an HTTPS or SSH remote and in a
+// provider ID.
+var hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
 func validateGitLab(g GitLabConfig) error {
-	if g.Host != "gitlab.com" {
-		return errors.New(`the gitlab provider's host must be "gitlab.com"`)
+	if !hostname.MatchString(g.Host) || len(g.Host) > 253 {
+		return fmt.Errorf("the gitlab provider's host must be a host name in lower case, such as gitlab.com, without scheme or port; got %q", g.Host)
 	}
 	where := "gitlab provider " + g.Host + ": "
 	if g.ExpectedUser == "" {

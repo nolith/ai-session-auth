@@ -32,6 +32,9 @@ var _ provider.Renderer = Renderer{}
 
 func (Renderer) Kind() string { return "gitlab" }
 
+// defaultHost is glab's default host when the session has it.
+const defaultHost = "gitlab.com"
+
 // hostname is what a host may look like as a YAML key, unquoted.
 var hostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$`)
 
@@ -50,8 +53,8 @@ func (Renderer) Render(dir *sessiondir.Dir, creds map[string]provider.Credential
 	}
 	// The default host, for commands run outside a repository.
 	primary := names[0]
-	if _, ok := hosts[host]; ok {
-		primary = host
+	if _, ok := hosts[defaultHost]; ok {
+		primary = defaultHost
 	}
 	var b bytes.Buffer
 	b.WriteString("# Written by geas for this session; replaced whole when a credential changes.\n")

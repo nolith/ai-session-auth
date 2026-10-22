@@ -20,14 +20,13 @@ type API struct {
 	Client      *http.Client
 	GitHubAPI   string
 	GitHubLogin string
-	GitLabURL   string
 }
 
 // New returns the client the session's providers share.
 func New() *API {
 	return &API{
 		Client:    &http.Client{Timeout: 30 * time.Second},
-		GitHubAPI: "https://api.github.com", GitHubLogin: "https://github.com", GitLabURL: "https://gitlab.com",
+		GitHubAPI: "https://api.github.com", GitHubLogin: "https://github.com",
 	}
 }
 

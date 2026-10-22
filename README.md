@@ -9,7 +9,8 @@ binding obligation laid on a hero: power, held under rules. Agents started
 with `geas` act as you, but only through short-lived credentials scoped to the
 repositories you allow.
 
-A Go launcher for GitHub.com and GitLab.com on Linux and macOS (amd64 and arm64).
+A Go launcher for GitHub.com and any number of GitLab instances (GitLab.com,
+self-managed, Dedicated) on Linux and macOS (amd64 and arm64).
 It has no external Go dependencies. Build with Go 1.23 or later; use the latest
 stable release where possible. Install `git`; `gh` and `glab` are used from
 your `PATH` when present, and the glab issuer needs `glab`.
@@ -110,18 +111,24 @@ User tokens can perform only operations allowed to both your user and the App.
 Commit authorship also depends on `git config user.name/user.email`: the token
 identifies the user performing the push; it does not rewrite the commit author.
 
-## One-time GitLab.com setup
+## One-time GitLab setup
+
+Each GitLab instance is one `gitlab` provider, with its `host`, such as
+`gitlab.com` or `ops.gitlab.net`, its own issuer, user and allowlist; each
+mints its own session PAT, in parallel with the others. The steps below use
+gitlab.com; replace it with each instance's host.
 
 The **issuer** is the credential that creates, finds and revokes each
-session's PAT: either your own `glab` login or a PAT you store.
+session's PAT: either your own `glab` login for that host or a PAT you store.
 
 ### Issuer: your glab login
 
-If `glab auth login` works for gitlab.com, set `"issuer": {"type": "glab"}`
-on the `gitlab` provider. It takes no `token_file`, and
-`save-gitlab-issuer` has nothing to save.
+If `glab auth login --hostname gitlab.com` works, set
+`"issuer": {"type": "glab"}` on the `gitlab` provider. It takes no
+`token_file`, and `save-gitlab-issuer` has nothing to save.
 
-Every issuer request then runs `glab api --hostname gitlab.com ...`:
+Every issuer request then runs `glab api --hostname <host> ...`, with the
+provider's host:
 
 - Nothing is stored and nothing needs rotating. An OAuth login renews its own
   token, which lasts two hours, so revocation at exit still works in longer
@@ -130,7 +137,7 @@ Every issuer request then runs `glab api --hostname gitlab.com ...`:
   checks a new PAT against its creator's permissions only when the creator is
   itself fine-grained, so a legacy-scoped OAuth login can create it.
 - glab is resolved on your `PATH` at start, runs from `/` and is pinned to
-  gitlab.com: neither the current repository's remote nor glab's `:fullpath`
+  the provider's host: neither the current repository's remote nor glab's `:fullpath`
   style placeholders can redirect a request.
 - glab runs without `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`,
   `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, host overrides or HTTP
@@ -154,7 +161,8 @@ their PATs, which then expire on their own. `glab auth login` fixes both.
 ### Issuer: a stored PAT
 
 Set `"issuer": {"type": "bearer", "token_file": "~/.local/state/geas/gitlab-issuer"}`
-on the `gitlab` provider; geas sends the PAT stored there as a bearer token.
+on the `gitlab` provider; geas sends the PAT stored there as a bearer token
+to `https://<host>`.
 Open https://gitlab.com/-/user_settings/personal_access_tokens.
 Create an **issuer PAT** for your own user, separate from the agent's session PATs.
 
@@ -241,13 +249,14 @@ command, names another. It is version 2, a list of providers:
 }
 ```
 
-| Field           | Meaning                                                                                 |
-| :-------------- | :-------------------------------------------------------------------------------------- |
-| `version`       | `2`, required                                                                           |
-| `session_hours` | the session's length, 24 by default, at most 48                                         |
-| `providers`     | one entry per credential source, by `type`: `gitlab` or `github`; one provider per host |
+| Field           | Meaning                                                                                                    |
+| :-------------- | :--------------------------------------------------------------------------------------------------------- |
+| `version`       | `2`, required                                                                                              |
+| `session_hours` | the session's length, 24 by default, at most 48                                                            |
+| `providers`     | one entry per credential source, by `type`: `gitlab` (one per instance) or `github`; one provider per host |
 
-A `gitlab` provider has `host` (`gitlab.com`), `issuer`, `expected_user`,
+A `gitlab` provider has `host` (such as `gitlab.com`, a host name in lower
+case, without scheme or port), `issuer`, `expected_user`,
 its allowlist (see "Allowlist" above) and `permissions`; the `github`
 provider has `host` (`github.com`, the only one supported), `client_id`,
 `expected_user`, `state_file`, and `owners` or `repositories`. Relative
@@ -592,8 +601,9 @@ geas writes `glab/config.yml` and `gh/hosts.yml` with the session's
 credentials; personal aliases, extensions, and preferences are not copied.
 
 URL rewriting supports `git@github.com:owner/repo.git`,
-`ssh://git@github.com/...`, and their GitLab.com equivalents. SSH aliases and
-custom hosts or ports are unsupported. Git configuration on disk is unchanged.
+`ssh://git@github.com/...`, and their equivalents on each GitLab host. SSH
+aliases and custom ports are unsupported.
+ Git configuration on disk is unchanged.
 Remotes must not contain embedded tokens or passwords.
 SSH/GPG commit signing is configured separately.
 

@@ -124,6 +124,13 @@ func TestConfigRejectsMissingFields(t *testing.T) {
 	if err := c.validate(); err != nil {
 		t.Fatal(err)
 	}
+	// One provider per GitLab host.
+	second := gitlabConfig()
+	second.Host = "ops.gitlab.net"
+	c.GitLab = append(c.GitLab, second)
+	if err := c.validate(); err != nil {
+		t.Fatalf("two instances: %v", err)
+	}
 	c.GitHub[0].StateFile = ""
 	if _, err := load(t, c); err == nil {
 		t.Fatal("missing path expanded into directory")
@@ -137,6 +144,11 @@ func TestConfigRejectsMissingFields(t *testing.T) {
 		"two GitHubs":          func(c *Config) { c.GitHub = append(c.GitHub, c.GitHub[0]) },
 		"two gitlab.com":       func(c *Config) { c.GitLab = append(c.GitLab, c.GitLab[0]) },
 		"GitLab without host":  func(c *Config) { c.GitLab[0].Host = "" },
+		"GitLab with a scheme": func(c *Config) { c.GitLab[0].Host = "https://gitlab.com" },
+		"GitLab with a port":   func(c *Config) { c.GitLab[0].Host = "gitlab.com:8443" },
+		"GitLab in capitals":   func(c *Config) { c.GitLab[0].Host = "GitLab.com" },
+		"GitLab with a path":   func(c *Config) { c.GitLab[0].Host = "gitlab.com/x" },
+		"GitLab on github.com": func(c *Config) { c.GitLab[0].Host = "github.com" },
 		"GitLab without user":  func(c *Config) { c.GitLab[0].ExpectedUser = "" },
 		"GitHub without users": func(c *Config) { c.GitHub[0].ExpectedUser = "" },
 	} {

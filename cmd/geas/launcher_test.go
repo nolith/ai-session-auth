@@ -54,14 +54,20 @@ type testSession struct {
 	started  string   // the harness writes its PID here once it runs
 }
 
-// launch runs the launcher with a fake glab issuer around the harness script,
-// which runs under /bin/sh, adding env to its environment.
+// launch runs the launcher with a fake glab issuer for gitlab.com around the
+// harness script, which runs under /bin/sh, adding env to its environment.
 func launch(t *testing.T, script string, env ...string) *testSession {
+	t.Helper()
+	return launchConfig(t, config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}}, script, env...)
+}
+
+// launchConfig is launch with the configuration c.
+func launchConfig(t *testing.T, c config.Config, script string, env ...string) *testSession {
 	t.Helper()
 	s := &testSession{glab: testutil.FakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
-	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}}
 	raw, _ := json.Marshal(c)
+
 	s.config = filepath.Join(dir, "config.json")
 	if err := os.WriteFile(s.config, raw, 0600); err != nil {
 		t.Fatal(err)
@@ -637,5 +643,67 @@ func TestExitCodes(t *testing.T) {
 		if code != tc.code || output != tc.output {
 			t.Errorf("%s: exit %d, output %q; want %d, %q", tc.name, code, output, tc.code, tc.output)
 		}
+	}
+}
+
+// Two GitLab instances, each through the user's own glab login for its
+// host: both mint in the background, glab's config.yml has an entry for
+// each, Git gets each host's PAT from the helper, and both are revoked.
+func TestTwoGitLabInstances(t *testing.T) {
+	second := testutil.GlabConfig()
+	second.Host = "gitlab.example.com"
+	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig(), second}}
+	script := `until grep -qs '"state":"ready"' "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com" && grep -qs '"state":"ready"' "$GEAS_SESSION_DIR/markers/gitlab:gitlab.example.com"; do sleep 0.02; done
+until [ "$(grep -c '"id":42' "$GEAS_SESSION_DIR/ledger")" = 2 ]; do sleep 0.02; done
+printf 'glab=%s\n' "$GLAB_CONFIG_DIR"
+grep -E '^    [a-z.]+:$|^host:' "$GLAB_CONFIG_DIR/config.yml"
+"$GEAS_TEST_BINARY" status; echo "status exit $?"
+if command -v git >/dev/null; then
+	printf 'protocol=https\nhost=gitlab.example.com\npath=group/project.git\n\n' | git credential fill
+fi`
+	s := launchConfig(t, c, script)
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	output := string(raw)
+	for _, want := range []string{
+		"/glab\nhost: gitlab.com\n    gitlab.com:\n    gitlab.example.com:\n",
+		"gitlab:gitlab.com          ready\ngitlab:gitlab.example.com  ready\nstatus exit 0\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("harness output lacks %q:\n%s", want, output)
+		}
+	}
+	if _, err := exec.LookPath("git"); err == nil && !strings.Contains(output, "username=oauth2\npassword=session-secret\n") {
+		t.Errorf("Git got no PAT for the second instance:\n%s", output)
+	}
+	waitReaper(t, s)
+	// Every call is pinned to one of the two hosts, and each host minted,
+	// resolved and revoked its own PAT.
+	hosts := map[string][]string{}
+	for _, call := range testutil.Calls(t, s.glab) {
+		if len(call) < 4 || call[0] != "api" || call[1] != "--hostname" {
+			t.Fatalf("call not pinned to a host: %q", call)
+		}
+		last := call[len(call)-1]
+		step := last
+		switch {
+		case strings.HasPrefix(last, "query=query SessionLookup"):
+			step = "lookup"
+		case strings.HasPrefix(last, "input="):
+			step = "mint"
+		case strings.HasPrefix(last, "query=query SessionPAT"):
+			step = "id lookup"
+		}
+		hosts[call[2]] = append(hosts[call[2]], step)
+	}
+	want := []string{"lookup", "mint", "id lookup", "personal_access_tokens/42"}
+	if len(hosts) != 2 || !slices.Equal(hosts["gitlab.com"], want) || !slices.Equal(hosts["gitlab.example.com"], want) {
+		t.Fatalf("calls by host: %q", hosts)
+	}
+	if count, _ := deletes(t, s); count != 2 {
+		t.Fatalf("%d DELETE calls", count)
+	}
+	if left := sessions(t, s); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
 	}
 }
