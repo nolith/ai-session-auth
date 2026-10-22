@@ -1,8 +1,11 @@
 package ledger
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,5 +140,74 @@ func TestRemove(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("session directory left: %v", err)
+	}
+}
+
+// revokerFunc revokes as its function says.
+type revokerFunc func(context.Context, Entry) error
+
+func (f revokerFunc) Revoke(ctx context.Context, e Entry) error { return f(ctx, e) }
+
+// Providers revoke in parallel, each its own entries in order; an entry is
+// closed once revoked or gone, and stays open otherwise.
+func TestRevokeAcrossProviders(t *testing.T) {
+	l, _ := newLedger(t)
+	entries := []Entry{
+		{Provider: "a", Name: "a1", ID: 1},
+		{Provider: "b", Name: "b1"},
+		{Provider: "a", Name: "a2", ID: 2},
+		{Provider: "a", Name: "a3", ID: 3},
+		{Provider: "gone", Name: "c1"},
+	}
+	for _, e := range entries {
+		if err := l.Record(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a waits for b to start: revoking one provider after the other would
+	// never get past a1.
+	started := make(chan struct{})
+	var order []string
+	failed := errors.New("issuer down")
+	providers := map[string]Revoker{
+		"a": revokerFunc(func(ctx context.Context, e Entry) error {
+			if e.Name == "a1" {
+				select {
+				case <-started:
+				case <-time.After(10 * time.Second):
+					return errors.New("not in parallel")
+				}
+			}
+			order = append(order, e.Name)
+			switch e.Name {
+			case "a2":
+				return ErrGone
+			case "a3":
+				return failed
+			}
+			return nil
+		}),
+		"b": revokerFunc(func(ctx context.Context, e Entry) error {
+			close(started)
+			return ErrNotFound
+		}),
+	}
+	results := l.Revoke(context.Background(), entries, providers)
+	want := []error{nil, ErrNotFound, ErrGone, failed, ErrNoProvider}
+	for i, r := range results {
+		if r.Entry.Name != entries[i].Name || !errors.Is(r.Err, want[i]) || (r.Err == nil) != (want[i] == nil) {
+			t.Errorf("result %d: %+v, want %v", i, r, want[i])
+		}
+	}
+	if strings.Join(order, " ") != "a1 a2 a3" {
+		t.Errorf("provider a revoked %v", order)
+	}
+	open, err := l.Unrevoked()
+	var names []string
+	for _, e := range open {
+		names = append(names, e.Name)
+	}
+	if err != nil || strings.Join(names, " ") != "b1 a3 c1" {
+		t.Fatalf("unrevoked: %v %v", names, err)
 	}
 }

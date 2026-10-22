@@ -285,16 +285,25 @@ launcher revokes before printing anything, survives an output that has gone
 away, and runs glab in its own process group so that the hangup cannot
 interrupt a revocation.
 
+Every PAT is in the session's ledger before it exists:
+`$XDG_STATE_HOME/geas/sessions/<session id>/ledger`
+(`~/.local/state/geas/sessions/` by default), owner-only, records the PAT's
+name before the request that mints it and its ID once it is resolved. The
+launcher revokes what the ledger lists, and removes the session's directory
+once nothing is left.
+
 Some terminals do not wait: closing a herdr pane follows SIGHUP and SIGTERM
-with SIGKILL about half a second later. After minting, the launcher therefore
+with SIGKILL about half a second later. Before minting, the launcher therefore
 starts a reaper (`geas _reaper`) in a new session, detached twice so
 that it is outside the pane's process tree. It receives only the configuration
-path and the PAT's name and ID, and waits on a pipe whose write end only the
+path and the session ID, and waits on a pipe whose write end only the
 launcher holds. After a clean revocation the launcher tells it so, and the
 reaper exits. If the pipe closes otherwise, because the launcher died by any
-signal or its own revocation failed, the reaper checks that the ID still names
-the session PAT, revokes it through the issuer, retries after 10 seconds and a
-minute if needed, and logs what it did to
+signal or its own revocation failed, the reaper revokes every PAT the ledger
+still lists through the issuer: it finds the PAT by name when the launcher died
+before resolving its ID, and checks that the ID still names the session PAT.
+It retries after 10 seconds and a minute if needed, removes the session's
+directory once nothing is left, and logs what it did to
 `$XDG_STATE_HOME/geas/reaper.log`
 (`~/.local/state/geas/reaper.log` by default), never to a terminal.
 
@@ -319,8 +328,8 @@ credential helper remain in place. `gh` or `glab` then fails with
 "GitHub is not available in this session: <reason>" (or GitLab) without
 running the real CLI, and Git HTTPS to an allowlisted repository on that host
 fails at once, with the helper telling Git to quit rather than ask a terminal
-or askpass program. A skipped GitLab mints no PAT, so there is no reaper and
-nothing to revoke at exit. Start a new session after fixing the login.
+or askpass program. A skipped GitLab mints no PAT, so its ledger stays empty
+and there is nothing to revoke at exit. Start a new session after fixing the login.
 
 ## Limits and isolation
 
@@ -380,8 +389,8 @@ fake `glab` (arguments, environment, locking, silent failures), group and
 project resolution, scope building, namespace, owner and repository allowlists, the
 Git credential protocol, PATH shims and the wrapper loop guard, URL rewriting
 with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
-after SIGHUP with the output gone, the reaper after SIGKILL and its silence
-after a clean exit, cancellable issuer input, and optional providers skipped
+after SIGHUP with the output gone, the ledger, the reaper after SIGKILL (also
+during the mint, finding the PAT by name) and its silence after a clean exit, cancellable issuer input, and optional providers skipped
 with warnings while their wrappers and Git refuse, or stopping the session when
 required.
 Provider APIs are simulated; tests do not use real credentials.

@@ -8,27 +8,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
 
-// The reaper revokes the session PAT when the launcher no longer can. A closing
-// herdr pane follows SIGHUP and SIGTERM with SIGKILL about half a second later,
-// often before the launcher's own revocation finishes, and kills the whole pane
-// process tree. The reaper is outside that tree and session, so it survives. It
-// gets only the configuration path and the PAT's name and ID, and waits on a
-// pipe whose write end only the launcher holds: EOF without reaperDone means
-// the launcher died, however it died, or its revocation failed.
+// The reaper revokes what the session's ledger lists when the launcher no
+// longer can. A closing herdr pane follows SIGHUP and SIGTERM with SIGKILL
+// about half a second later, often before the launcher's own revocation
+// finishes, and kills the whole pane process tree. The reaper is outside that
+// tree and session, so it survives. It gets only the configuration path and
+// the session ID, starts before anything revocable exists, and waits on a pipe
+// whose write end only the launcher holds: EOF without reaperDone means the
+// launcher died, however it died, or its revocation failed. Only then does it
+// read the ledger.
 
 const reaperDone = "revoked\n"
+
+// reaperPauses come before each revocation attempt: a create the launcher sent
+// as it died gets a minute to land before its name counts as never used.
+var reaperPauses = []time.Duration{0, 10 * time.Second, time.Minute}
 
 func reaperLogPath() string {
 	state, err := secretfile.StateDirectory()
@@ -42,8 +49,8 @@ func reaperLogPath() string {
 // which starts the reaper itself and exits: the reaper is then neither a
 // descendant of the launcher nor in its session. It returns the write end of
 // the reaper's pipe.
-func startReaper(binary, configPath string, pat gitlab.PAT) (*os.File, error) {
-	if configPath == "" || pat.ID <= 0 {
+func startReaper(binary, configPath, sessionID string) (*os.File, error) {
+	if configPath == "" || sessionID == "" {
 		return nil, errors.New("cannot start the revocation reaper")
 	}
 	// Close-on-exec: the harness, gh and glab never inherit either end.
@@ -52,7 +59,7 @@ func startReaper(binary, configPath string, pat gitlab.PAT) (*os.File, error) {
 		return nil, err
 	}
 	defer read.Close()
-	command := exec.Command(binary, "_reaper", "detach", configPath, pat.Name, strconv.FormatInt(pat.ID, 10))
+	command := exec.Command(binary, "_reaper", "detach", configPath, sessionID)
 	command.Dir = "/"
 	environment := procenv.Map(os.Environ())
 	for _, key := range inheritedCredentials {
@@ -72,11 +79,7 @@ func startReaper(binary, configPath string, pat gitlab.PAT) (*os.File, error) {
 // RunReaper serves `_reaper detach` and `_reaper watch`. SIGHUP, SIGINT and
 // SIGTERM never stop a revocation; ctx only cuts the pauses between attempts.
 func RunReaper(ctx context.Context, args []string) error {
-	if len(args) != 4 {
-		return errors.New("invalid reaper invocation")
-	}
-	id, err := strconv.ParseInt(args[3], 10, 64)
-	if err != nil || id <= 0 {
+	if len(args) != 3 {
 		return errors.New("invalid reaper invocation")
 	}
 	launcher := os.NewFile(3, "launcher")
@@ -91,14 +94,32 @@ func RunReaper(ctx context.Context, args []string) error {
 		command.ExtraFiles = []*os.File{launcher}
 		return command.Start()
 	case "watch":
-		return watch(ctx, launcher, args[1], gitlab.PAT{Name: args[2], ID: id})
+		return watch(ctx, launcher, args[1], args[2])
 	}
 	return errors.New("invalid reaper invocation")
 }
 
+// revokers builds, from the configuration alone, every provider an entry may
+// name, by ID.
+func revokers(settings config.Config) (map[string]ledger.Revoker, error) {
+	providers := map[string]ledger.Revoker{}
+	if config.Enabled(settings.GitLab.Enabled) {
+		gl, err := gitlab.New(settings.GitLab, settings.Duration(), api.New(), nil)
+		if err != nil {
+			return nil, err
+		}
+		providers[gl.ID()] = gl
+	}
+	if config.Enabled(settings.GitHub.Enabled) {
+		gh := github.New(settings.GitHub, api.New())
+		providers[gh.ID()] = gh
+	}
+	return providers, nil
+}
+
 // watch logs to reaperLogPath(), never to a terminal, and only when it acts.
-func watch(ctx context.Context, launcher io.Reader, configPath string, pat gitlab.PAT) error {
-	logf := func(format string, args ...any) {
+func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string) error {
+	logf := func(subject, format string, args ...any) {
 		if os.MkdirAll(filepath.Dir(reaperLogPath()), 0700) != nil {
 			return
 		}
@@ -107,45 +128,93 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat gitla
 			return
 		}
 		defer file.Close()
-		fmt.Fprintf(file, "%s %s (ID %d): %s\n", time.Now().UTC().Format(time.RFC3339), pat.Name, pat.ID, fmt.Sprintf(format, args...))
+		fmt.Fprintf(file, "%s %s: %s\n", time.Now().UTC().Format(time.RFC3339), subject, fmt.Sprintf(format, args...))
 	}
+	entryf := func(e ledger.Entry, format string, args ...any) {
+		subject := e.Name
+		if e.ID > 0 {
+			subject = fmt.Sprintf("%s (ID %d)", e.Name, e.ID)
+		}
+		logf(subject, format, args...)
+	}
+	session := "session " + sessionID
 	// Prepared before waiting, so that later changes to the configuration or
 	// PATH cannot prevent the revocation.
 	settings, err := config.Load(configPath)
 	if err != nil {
-		logf("cannot load the configuration: %v", err)
+		logf(session, "cannot load the configuration: %v", err)
 		return err
 	}
-	gl, err := gitlab.New(settings.GitLab, settings.Duration(), api.New(), nil)
+	providers, err := revokers(settings)
 	if err != nil {
-		logf("cannot prepare the issuer: %v", err)
+		logf(session, "cannot prepare the issuer: %v", err)
 		return err
 	}
 	message, _ := io.ReadAll(io.LimitReader(launcher, int64(len(reaperDone))+1))
 	if string(message) == reaperDone {
 		return nil
 	}
-	for _, pause := range []time.Duration{0, 10 * time.Second, time.Minute} {
+	book, err := ledger.Open(sessionID)
+	if err != nil {
+		logf(session, "cannot read the ledger: %v", err)
+		return err
+	}
+	pending, err := book.Unrevoked()
+	if err != nil {
+		book.Close()
+		logf(session, "cannot read the ledger: %v", err)
+		return err
+	}
+	// Retrying cannot revoke an entry whose provider is gone or whose ID
+	// names another credential; it stays in the ledger.
+	var refused bool
+	for attempt, pause := range reaperPauses {
+		if len(pending) == 0 {
+			break
+		}
 		if err = timing.SleepContext(ctx, pause); err != nil {
 			break
 		}
-		attempt, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		revoked, revokeErr := gl.RevokeChecked(attempt, pat)
+		last := attempt == len(reaperPauses)-1
+		revoking, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		results := book.Revoke(revoking, pending, providers)
 		cancel()
-		switch {
-		case revokeErr == nil && revoked:
-			logf("launcher gone without revoking; revoked")
-			return nil
-		case revokeErr == nil:
-			logf("launcher gone; already revoked or expired")
-			return nil
-		case errors.Is(revokeErr, gitlab.ErrOtherPAT):
-			logf("%v", revokeErr)
-			return revokeErr
+		pending = pending[:0]
+		for _, r := range results {
+			switch {
+			case r.Err == nil:
+				entryf(r.Entry, "launcher gone without revoking; revoked")
+			case errors.Is(r.Err, ledger.ErrGone):
+				entryf(r.Entry, "launcher gone; already revoked or expired")
+			case errors.Is(r.Err, ledger.ErrNotFound) && last:
+				// A create the launcher sent as it died had its chance to land.
+				r.Entry.Revoked = true
+				if err = book.Record(r.Entry); err != nil {
+					entryf(r.Entry, "cannot close the entry: %v", err)
+					refused = true
+					continue
+				}
+				entryf(r.Entry, "launcher gone; no PAT has this name, so none was created")
+			case errors.Is(r.Err, gitlab.ErrOtherPAT), errors.Is(r.Err, ledger.ErrNoProvider):
+				err = r.Err
+				refused = true
+				entryf(r.Entry, "%v", r.Err)
+			default:
+				// ErrNotFound before the last attempt too: the create may still
+				// be on its way.
+				err = r.Err
+				entryf(r.Entry, "revocation failed: %v", r.Err)
+				pending = append(pending, r.Entry)
+			}
 		}
-		err = revokeErr
-		logf("revocation failed: %v", revokeErr)
 	}
-	logf("giving up; the PAT expires at its configured UTC date")
-	return err
+	for _, e := range pending {
+		entryf(e, "giving up; the PAT expires at its configured UTC date")
+	}
+	if len(pending) > 0 || refused {
+		book.Close()
+		return err
+	}
+	book.Remove()
+	return nil
 }

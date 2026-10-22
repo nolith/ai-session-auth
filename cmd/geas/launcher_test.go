@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -47,23 +48,25 @@ type testSession struct {
 	done     chan error
 	output   *os.File // read end of the launcher's stdout and stderr
 	glab     string   // fake glab directory and call log
-	state    string   // XDG_STATE_HOME: glab.lock and reaper.log
+	state    string   // XDG_STATE_HOME: glab.lock, reaper.log and the ledger
+	config   string   // the configuration path, on the reaper's command line
+	started  string   // the harness writes its PID here once it runs
 }
 
-// startSession runs the launcher with a fake glab issuer around the harness
-// script, which runs under /bin/sh, and returns once the harness has started.
-func startSession(t *testing.T, script string) *testSession {
+// launch runs the launcher with a fake glab issuer around the harness script,
+// which runs under /bin/sh, adding env to its environment.
+func launch(t *testing.T, script string, env ...string) *testSession {
 	t.Helper()
 	s := &testSession{glab: testutil.FakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
 	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: testutil.Bool(false)}, GitLab: testutil.GlabConfig()}
 	raw, _ := json.Marshal(c)
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+	s.config = filepath.Join(dir, "config.json")
+	if err := os.WriteFile(s.config, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	started := filepath.Join(dir, "harness.pid")
-	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; " + script})
+	s.started = filepath.Join(dir, "harness.pid")
+	args, _ := json.Marshal([]string{"--config", s.config, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(s.started) + "; " + script})
 	read, write, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -71,33 +74,39 @@ func startSession(t *testing.T, script string) *testSession {
 	s.output = read
 	s.launcher = exec.Command(os.Args[0])
 	s.launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
+	s.launcher.Env = append(s.launcher.Env, env...)
 	s.launcher.Stdout, s.launcher.Stderr = write, write
 	if err = s.launcher.Start(); err != nil {
 		t.Fatal(err)
 	}
 	write.Close()
-	exited := make(chan error, 1)
-	go func() { exited <- s.launcher.Wait() }()
+	go func() { s.done <- s.launcher.Wait() }()
 	// Wait for the reaper too, so that the temporary directories outlive it.
 	t.Cleanup(func() { waitReaper(t, s) })
+	return s
+}
+
+// startSession launches a session and returns once the harness has started.
+func startSession(t *testing.T, script string) *testSession {
+	t.Helper()
+	s := launch(t, script)
 	deadline := time.After(20 * time.Second)
 	for {
-		if raw, err := os.ReadFile(started); err == nil && strings.HasSuffix(string(raw), "\n") {
+		if raw, err := os.ReadFile(s.started); err == nil && strings.HasSuffix(string(raw), "\n") {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
 				// Only matters if nothing else stops it.
 				t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
 			}
-			go func() { s.done <- <-exited }()
 			return s
 		}
 		select {
-		case err := <-exited:
+		case err := <-s.done:
 			// A harness that exits at once may finish before it is seen.
-			if raw, _ := os.ReadFile(started); len(raw) > 0 {
+			if raw, _ := os.ReadFile(s.started); len(raw) > 0 {
 				s.done <- err
 				return s
 			}
-			output, _ := io.ReadAll(read)
+			output, _ := io.ReadAll(s.output)
 			if strings.Contains(string(output), "UNIX socket") {
 				t.Skip("runtime prohibits UNIX sockets")
 			}
@@ -119,19 +128,16 @@ func (s *testSession) wait(t *testing.T) {
 	}
 }
 
-// reaperPID finds this session's reaper by the PAT name on its command line.
+// reaperPID finds this session's reaper by the configuration path on its
+// command line, which no other test shares.
 func reaperPID(t *testing.T, s *testSession) int {
 	t.Helper()
-	name, err := os.ReadFile(filepath.Join(s.glab, "name"))
-	if err != nil || len(name) == 0 {
-		return 0
-	}
 	output, err := exec.Command("ps", "-A", "-o", "pid=,args=").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {
-		if strings.Contains(line, "_reaper watch ") && strings.Contains(line, string(name)) {
+		if strings.Contains(line, "_reaper watch ") && strings.Contains(line, s.config+" ") {
 			pid, _ := strconv.Atoi(strings.Fields(line)[0])
 			return pid
 		}
@@ -160,6 +166,20 @@ func deletes(t *testing.T, s *testSession) (count int, checked bool) {
 	return count, checked
 }
 
+// sessions lists the session directories left in the state directory.
+func sessions(t *testing.T, s *testSession) []string {
+	t.Helper()
+	dirs, err := os.ReadDir(filepath.Join(s.state, "geas", "sessions"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, dir := range dirs {
+		names = append(names, dir.Name())
+	}
+	return names
+}
+
 // A closed terminal or pane takes the launcher's output with it, then sends
 // SIGHUP: the harness must still be stopped and the session PAT revoked.
 func TestHangupStopsHarnessAndRevokes(t *testing.T) {
@@ -178,6 +198,9 @@ func TestHangupStopsHarnessAndRevokes(t *testing.T) {
 	if count, checked := deletes(t, s); count != 1 || checked {
 		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
 	}
+	if left := sessions(t, s); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
+	}
 }
 
 // The launcher revokes on a clean exit and tells the reaper, which does nothing.
@@ -194,6 +217,9 @@ func TestCleanExitRevokesOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.state, "geas", "reaper.log")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("reaper logged on a clean exit: %v", err)
+	}
+	if left := sessions(t, s); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
 	}
 }
 
@@ -226,8 +252,73 @@ func TestKilledLauncherIsReaped(t *testing.T) {
 		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
 	}
 	log, err := os.ReadFile(filepath.Join(s.state, "geas", "reaper.log"))
-	if err != nil || !strings.Contains(string(log), "launcher gone without revoking; revoked") {
+	if err != nil || !strings.Contains(string(log), "(ID 42): launcher gone without revoking; revoked") {
 		t.Fatalf("reaper log: %q %v", log, err)
+	}
+	if left := sessions(t, s); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
+	}
+}
+
+// SIGKILL between "name written" and "mint returned": the ledger holds the
+// PAT's name and no ID yet, and the reaper finds the PAT by that name.
+func TestLauncherKilledDuringMintIsReaped(t *testing.T) {
+	s := launch(t, "exec sleep 30", "FAKE_GLAB_BLOCK=1")
+	release := filepath.Join(s.glab, "release")
+	// Before waitReaper, which needs the mint out of the way.
+	t.Cleanup(func() { os.WriteFile(release, nil, 0600) })
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(s.glab, "mutation")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the mutation never reached the issuer")
+		}
+	}
+	name, err := os.ReadFile(filepath.Join(s.glab, "name"))
+	if err != nil || len(name) == 0 {
+		t.Fatalf("minted name: %q %v", name, err)
+	}
+	left := sessions(t, s)
+	if len(left) != 1 {
+		t.Fatalf("session directories: %v", left)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.state, "geas", "sessions", left[0], "ledger"))
+	var entry ledger.Entry
+	if err != nil || json.Unmarshal(raw, &entry) != nil || strings.Count(string(raw), "\n") != 1 || entry.Name != string(name) || entry.ID != 0 || entry.Revoked {
+		t.Fatalf("ledger during the mint: %q %v", raw, err)
+	}
+	if reaperPID(t, s) == 0 {
+		t.Fatal("no reaper before the mint")
+	}
+	if err = s.launcher.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	s.wait(t)
+	// The mint lands after the launcher is gone, as GitLab would complete it.
+	if err = os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitReaper(t, s)
+	calls := testutil.Calls(t, s.glab)
+	var after [][]string
+	for i, call := range calls {
+		if len(call) > 4 && strings.HasPrefix(call[len(call)-1], "input=") {
+			after = calls[i+1:]
+		}
+	}
+	if len(after) != 3 || after[0][len(after[0])-1] != "query=query SessionPAT {\n  currentUser { personalAccessTokens(search: \""+string(name)+"\") { nodes { id name } } }\n}\n" {
+		t.Fatalf("calls after the mint: %q", after)
+	}
+	if count, checked := deletes(t, s); count != 1 || !checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+	log, err := os.ReadFile(filepath.Join(s.state, "geas", "reaper.log"))
+	if err != nil || !strings.Contains(string(log), " "+string(name)+": launcher gone without revoking; revoked") {
+		t.Fatalf("reaper log: %q %v", log, err)
+	}
+	if left := sessions(t, s); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
 	}
 }
 

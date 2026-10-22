@@ -104,7 +104,7 @@ func (g *Provider) Refresh(ctx context.Context, _ provider.Credential) (provider
 
 // Revoke does nothing: an App user token expires on its own, and revoking it
 // would sign out every other session sharing the login.
-func (g *Provider) Revoke(ctx context.Context) error { return nil }
+func (g *Provider) Revoke(ctx context.Context, _ ledger.Entry) error { return nil }
 
 func credential(state GitHubState) provider.Credential {
 	return provider.Credential{Secret: state.AccessToken, Expires: time.Unix(int64(state.ExpiresAt), 0)}

@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -135,21 +136,20 @@ func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	})
 }
 
-// PAT names one token this session created; ID is 0 until it is resolved.
-type PAT struct {
-	Name string
-	ID   int64
-}
 type Provider struct {
-	Config  config.GitLabConfig
-	Issuer  issuer
-	Created []PAT
+	Config config.GitLabConfig
+	Issuer issuer
 	// Duration is the session's: a session PAT lives until the UTC midnight
 	// after it.
 	Duration time.Duration
 	Now      func() time.Time
 	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
 	Steps *timing.Timer
+
+	mu sync.Mutex
+	// minted names the PATs this process minted: an ID it resolved for one
+	// of them needs no check before the DELETE.
+	minted map[string]bool
 }
 
 // New returns the provider for one GitLab host, whose session PATs last for
@@ -245,15 +245,22 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 	if len(result.Errors) > 0 || len(result.Data.Create.Errors) > 0 || result.Data.Create.Token == "" {
 		return "", errors.New("GitLab PAT creation failed: verify granular scopes and issuer permissions")
 	}
+	g.mu.Lock()
+	if g.minted == nil {
+		g.minted = map[string]bool{}
+	}
+	g.minted[name] = true
+	g.mu.Unlock()
 	// The mutation returns no ID. Resolving it now leaves a single DELETE for
 	// the exit, which may have little time, and gives the reaper its target.
-	g.Created = append(g.Created, PAT{Name: name})
 	id, err := g.find(ctx, name)
 	g.Steps.Step("id lookup")
+	if errors.Is(err, ledger.ErrNotFound) {
+		err = errUnresolved
+	}
 	if err != nil {
 		return "", provider.CreatedError{Err: err}
 	}
-	g.Created[len(g.Created)-1].ID = id
 	entry.ID = id
 	if err := l.Record(entry); err != nil {
 		return "", provider.CreatedError{Err: err}
@@ -479,8 +486,11 @@ func findDocument(name string) string {
 	return fmt.Sprintf("query SessionPAT {\n  currentUser { personalAccessTokens(search: %s) { nodes { id name } } }\n}\n", graphqlString(name))
 }
 
+var errUnresolved = errors.New("cannot uniquely resolve session PAT for revocation")
+
 // find resolves a PAT's numeric ID by name, for the revocation: the mutation
-// returns no ID. A name that matches more than one token is refused.
+// returns no ID. A name that matches no token is ledger.ErrNotFound, and one
+// that matches more than one is refused.
 func (g *Provider) find(ctx context.Context, name string) (int64, error) {
 	var answer struct {
 		Errors []any `json:"errors"`
@@ -509,35 +519,43 @@ func (g *Provider) find(ctx context.Context, name string) (int64, error) {
 		}
 		numeric, err := parseGlobalID(match.ID, "PersonalAccessToken")
 		if err != nil {
-			return 0, errors.New("cannot uniquely resolve session PAT for revocation")
+			return 0, errUnresolved
 		}
 		id = numeric
 		count++
 	}
+	if count == 0 {
+		return 0, ledger.ErrNotFound
+	}
 	if count != 1 || id <= 0 {
-		return 0, errors.New("cannot uniquely resolve session PAT for revocation")
+		return 0, errUnresolved
 	}
 	return id, nil
 }
 
-// Revoke revokes every PAT this provider created, resolving an ID the start
-// could not.
-func (g *Provider) Revoke(ctx context.Context) error {
-	for len(g.Created) > 0 {
-		pat := g.Created[0]
-		if pat.ID == 0 {
-			id, err := g.find(ctx, pat.Name)
-			if err != nil {
-				return err
-			}
-			pat.ID = id
-		}
-		if err := g.Issuer.rest(ctx, http.MethodDelete, fmt.Sprintf("personal_access_tokens/%d", pat.ID), nil); err != nil {
+// Revoke revokes one session PAT, finding it by name when the ledger has no
+// ID for it. A PAT this process minted is deleted at once, which leaves the
+// exit a single DELETE; any other, such as the reaper's, is checked first.
+func (g *Provider) Revoke(ctx context.Context, e ledger.Entry) error {
+	id := e.ID
+	if id == 0 {
+		found, err := g.find(ctx, e.Name)
+		if err != nil {
 			return err
 		}
-		g.Created = g.Created[1:]
+		id = found
 	}
-	return nil
+	g.mu.Lock()
+	minted := g.minted[e.Name]
+	g.mu.Unlock()
+	if minted {
+		return g.Issuer.rest(ctx, http.MethodDelete, fmt.Sprintf("personal_access_tokens/%d", id), nil)
+	}
+	revoked, err := g.revokeChecked(ctx, e.Name, id)
+	if err == nil && !revoked {
+		return ledger.ErrGone
+	}
+	return err
 }
 
 var ErrOtherPAT = errors.New("the PAT ID names another token; not revoking it")
@@ -545,21 +563,21 @@ var ErrOtherPAT = errors.New("the PAT ID names another token; not revoking it")
 // revokeChecked revokes a session PAT by ID once GitLab confirms that the ID
 // still names it. One already revoked or expired is left alone, so a launcher
 // that revoked just before dying causes no second DELETE.
-func (g *Provider) RevokeChecked(ctx context.Context, pat PAT) (bool, error) {
+func (g *Provider) revokeChecked(ctx context.Context, name string, id int64) (bool, error) {
 	var current struct {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
 	}
-	if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("personal_access_tokens/%d", pat.ID), &current); err != nil {
+	if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("personal_access_tokens/%d", id), &current); err != nil {
 		return false, err
 	}
-	if current.Name != pat.Name {
+	if current.Name != name {
 		return false, ErrOtherPAT
 	}
 	if !current.Active {
 		return false, nil
 	}
-	if err := g.Issuer.rest(ctx, http.MethodDelete, fmt.Sprintf("personal_access_tokens/%d", pat.ID), nil); err != nil {
+	if err := g.Issuer.rest(ctx, http.MethodDelete, fmt.Sprintf("personal_access_tokens/%d", id), nil); err != nil {
 		return false, err
 	}
 	return true, nil

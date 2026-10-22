@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -130,6 +132,71 @@ func skip(output io.Writer, provider, reason, fix string) {
 	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
 }
 
+// displayName is how the output names a provider kind.
+var displayName = map[string]string{"gitlab": "GitLab", "github": "GitHub"}
+
+// teardown revokes every unrevoked ledger entry through the provider that
+// created it, in parallel across providers. Once nothing is left it tells the
+// reaper and removes the session's directory; otherwise the reaper, reading
+// the ledger, retries what failed.
+func teardown(book *ledger.Ledger, providers []provider.Provider, reaper *os.File, output io.Writer) {
+	if reaper != nil {
+		defer reaper.Close()
+	}
+	revokers := map[string]ledger.Revoker{}
+	kinds := map[string]string{}
+	for _, p := range providers {
+		revokers[p.ID()] = p
+		kinds[p.ID()] = p.Kind()
+	}
+	cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	entries, err := book.Unrevoked()
+	var results []ledger.Result
+	if err == nil {
+		results = book.Revoke(cleanup, entries, revokers)
+	}
+	revoked := map[string]bool{}
+	failed := map[string]bool{}
+	for _, r := range results {
+		kind := kinds[r.Entry.Provider]
+		switch {
+		case r.Err == nil:
+			revoked[kind] = true
+		case errors.Is(r.Err, ledger.ErrGone):
+		case errors.Is(r.Err, ledger.ErrNotFound):
+			// Every request this process sent has returned: a name the
+			// provider does not know was never created.
+			r.Entry.Revoked = true
+			if book.Record(r.Entry) != nil {
+				failed[kind] = true
+			}
+		default:
+			failed[kind] = true
+		}
+	}
+	if err != nil || len(failed) > 0 {
+		// The ledger stays: it names what is left to revoke.
+		book.Close()
+		if err != nil {
+			for _, p := range providers {
+				failed[p.Kind()] = true
+			}
+		}
+		for _, kind := range slices.Sorted(maps.Keys(failed)) {
+			fmt.Fprintln(output, "WARNING: "+displayName[kind]+" revocation failed; the reaper retries it, see "+reaperLogPath()+".")
+		}
+		return
+	}
+	if reaper != nil {
+		reaper.WriteString(reaperDone)
+	}
+	book.Remove()
+	for _, kind := range slices.Sorted(maps.Keys(revoked)) {
+		fmt.Fprintln(output, displayName[kind]+" session PAT revoked.")
+	}
+}
+
 // Run runs one session around args: it resolves the providers' credentials,
 // starts the harness, and revokes what it minted on the way out. The exit code
 // it returns is the harness's.
@@ -192,37 +259,19 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 			gh = nil
 		}
 	}
-	// The reaper's pipe: closed without "revoked", it revokes the PAT itself.
+	// The reaper's pipe: closed without "revoked", it revokes the ledger itself.
 	var reaper *os.File
 	var book *ledger.Ledger
 	if gl != nil {
 		defer func() {
-			if reaper != nil {
-				defer reaper.Close()
-			}
-			if len(gl.Created) == 0 {
-				if book != nil {
-					book.Remove()
-				}
+			if book == nil {
 				return
 			}
-			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := gl.Revoke(cleanup); err != nil {
-				// The ledger stays: it names what is left to revoke.
-				book.Close()
-				if reaper != nil {
-					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the reaper retries it, see "+reaperLogPath()+".")
-				} else {
-					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the PAT will expire at its configured UTC date.")
-				}
-				return
+			providers := []provider.Provider{gl}
+			if gh != nil {
+				providers = append(providers, gh)
 			}
-			if reaper != nil {
-				reaper.WriteString(reaperDone)
-			}
-			book.Remove()
-			fmt.Fprintln(output, "GitLab session PAT revoked.")
+			teardown(book, providers, reaper, output)
 		}()
 	}
 	sessionBroker := &broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
@@ -248,9 +297,14 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		if book, err = ledger.Create(id); err != nil {
 			return 1, err
 		}
+		// Before the mint: whatever the ledger will list, the reaper revokes
+		// if the launcher cannot.
+		if reaper, err = startReaper(binary, settings.Source(), id); err != nil {
+			return 1, err
+		}
 		credential, err := gl.Acquire(ctx, book)
-		// Skipped only before a PAT exists: one that was minted is revoked at
-		// exit, which a skipped provider never needs.
+		// Skipped only before a PAT exists: a failure after the mint stops the
+		// session, as it always has. The ledger revokes the PAT either way.
 		if err != nil && !errors.As(err, new(provider.CreatedError)) {
 			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
 		}
@@ -263,8 +317,6 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		}
 		if err != nil {
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-		} else if reaper, err = startReaper(binary, settings.Source(), gl.Created[0]); err != nil {
-			return 1, err
 		}
 	}
 	if (githubSkipped != "" || !config.Enabled(settings.GitHub.Enabled)) && (gitlabSkipped != "" || !config.Enabled(settings.GitLab.Enabled)) {

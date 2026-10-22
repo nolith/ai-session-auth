@@ -60,7 +60,10 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 // FakeGlab writes a glab into a new directory and returns it. Each call
 // records its arguments (NUL-separated), environment and directory there, and
-// is answered as gitlab.com would for alice and group/project (ID 42).
+// is answered as gitlab.com would for alice and group/project (ID 42). The id
+// lookup finds only the names the mutation minted. With FAKE_GLAB_BLOCK set,
+// the mutation mints, creates "mutation" and waits for a "release" file
+// before it answers, as a slow mint would.
 func FakeGlab(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -85,12 +88,24 @@ done
 case "$method $last" in
 "GET user") echo '{"username":"alice"}' ;;
 "GET projects/42") echo '{"path_with_namespace":"group/project"}' ;;
-" input="*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
+" input="*)
+	name=$(printf '%s' "$last" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
+	printf '%s\n' "$name" >>"$log/minted"
+	printf '%s' "$name" >"$log/name"
+	if [ -n "${FAKE_GLAB_BLOCK-}" ]; then
+		touch "$log/mutation"
+		while [ ! -e "$log/release" ]; do sleep 0.05; done
+	fi
+	echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}'
+	;;
 " query="*)
 	case "$last" in
 	*personalAccessTokens*)
 		name=$(printf '%s' "$last" | sed -n 's/.*search: "\([^"]*\)".*/\1/p')
-		printf '%s' "$name" >"$log/name"
+		if ! grep -qxF "$name" "$log/minted" 2>/dev/null; then
+			echo '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[]}}}}'
+			exit 0
+		fi
 		printf '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[{"id":"gid://gitlab/PersonalAccessToken/99","name":"%s-other"},{"id":"gid://gitlab/PersonalAccessToken/42","name":"%s"}]}}}}\n' "$name" "$name"
 		;;
 	*"projects(ids:"*)

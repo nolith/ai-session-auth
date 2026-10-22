@@ -12,7 +12,7 @@ import (
 
 // A Provider is one credential source for one host, e.g. GitLab on
 // gitlab.com. The session acquires its credential before the harness starts
-// and revokes what it created when the session ends.
+// and revokes what the ledger lists when the session ends.
 type Provider interface {
 	// ID is unique within a session, e.g. "gitlab:gitlab.com".
 	ID() string
@@ -24,8 +24,11 @@ type Provider interface {
 	// Refresh returns a replacement before Credential.Expires, or the same
 	// credential when it never expires within the session.
 	Refresh(ctx context.Context, c Credential) (Credential, error)
-	// Revoke undoes every credential this provider created.
-	Revoke(ctx context.Context) error
+	// Revoke undoes one ledger entry this provider created. The reaper calls
+	// it from a fresh process, so it must not rely on in-memory state. It
+	// returns ledger.ErrGone when nothing is left to revoke, and
+	// ledger.ErrNotFound when no credential has the entry's name.
+	Revoke(ctx context.Context, e ledger.Entry) error
 }
 
 // Credential is what a provider hands the session: the secret a tool sends,

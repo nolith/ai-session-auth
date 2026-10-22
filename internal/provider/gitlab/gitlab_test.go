@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -184,13 +185,15 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
-	if entries, err := book.Entries(); err != nil || len(entries) != 1 || entries[0].Name != name || entries[0].ID != 42 || entries[0].Revoked {
+	entries, err := book.Entries()
+	if err != nil || len(entries) != 1 || entries[0].Name != name || entries[0].ID != 42 || entries[0].Revoked {
 		t.Fatalf("ledger after the id lookup: %+v %v", entries, err)
 	}
-	if err = g.Revoke(context.Background()); err != nil {
+	// Minted here: a single DELETE, no check first.
+	if err = g.Revoke(context.Background(), entries[0]); err != nil {
 		t.Fatal(err)
 	}
-	if !deleted || len(g.Created) != 0 {
+	if !deleted {
 		t.Fatal("PAT not revoked")
 	}
 }
@@ -249,7 +252,11 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
-	if err = g.Revoke(context.Background()); err != nil {
+	entries, err := book.Entries()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ledger: %+v %v", entries, err)
+	}
+	if err = g.Revoke(context.Background(), entries[0]); err != nil {
 		t.Fatal(err)
 	}
 	calls := testutil.Calls(t, dir)
@@ -485,29 +492,47 @@ func must[T any](value T, err error) T {
 	return value
 }
 
-func TestRevokeCheckedLeavesOtherTokens(t *testing.T) {
+// The reaper revokes from a fresh process: it finds a PAT by name when the
+// ledger has no ID, and checks that the ID still names an active session PAT
+// before the DELETE.
+func TestRevokeFromLedger(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		id      int64
+		found   bool
 		current map[string]any
-		revoked bool
-		fails   bool
+		deleted bool
+		want    error
 	}{
-		{"active", map[string]any{"name": "geas-x", "active": true}, true, false},
-		{"already revoked", map[string]any{"name": "geas-x", "active": false}, false, false},
-		{"another token", map[string]any{"name": "someone-else", "active": true}, false, true},
+		{"active", 42, true, map[string]any{"name": "geas-x", "active": true}, true, nil},
+		{"already revoked", 42, true, map[string]any{"name": "geas-x", "active": false}, false, ledger.ErrGone},
+		{"another token", 42, true, map[string]any{"name": "someone-else", "active": true}, false, ErrOtherPAT},
+		{"found by name", 0, true, map[string]any{"name": "geas-x", "active": true}, true, nil},
+		{"never minted", 0, false, nil, false, ledger.ErrNotFound},
 	} {
-		deleted := false
+		deleted, searched := false, false
 		api := mockAPI(t, func(r *http.Request) (int, any) {
-			if r.Method == http.MethodDelete {
+			switch {
+			case r.URL.Path == "/api/graphql":
+				searched = true
+				query, _ := graphqlPayload(t, r)
+				if !tc.found {
+					return 200, map[string]any{"data": map[string]any{"currentUser": map[string]any{"personalAccessTokens": map[string]any{"nodes": []any{}}}}}
+				}
+				return 200, patAnswer(t, query)
+			case r.URL.Path != "/api/v4/personal_access_tokens/42":
+				t.Errorf("%s: unexpected %s %s", tc.name, r.Method, r.URL)
+				return 404, nil
+			case r.Method == http.MethodDelete:
 				deleted = true
 				return 204, nil
 			}
 			return 200, tc.current
 		})
 		g := &Provider{Issuer: bearerIssuer{client: api, token: "issuer"}}
-		revoked, err := g.RevokeChecked(context.Background(), PAT{Name: "geas-x", ID: 42})
-		if revoked != tc.revoked || deleted != tc.revoked || (err != nil) != tc.fails {
-			t.Errorf("%s: revoked %v, deleted %v, err %v", tc.name, revoked, deleted, err)
+		err := g.Revoke(context.Background(), ledger.Entry{Provider: "gitlab:gitlab.com", Name: "geas-x", ID: tc.id})
+		if deleted != tc.deleted || searched != (tc.id == 0) || !errors.Is(err, tc.want) || (err == nil) != (tc.want == nil) {
+			t.Errorf("%s: deleted %v, searched %v, err %v", tc.name, deleted, searched, err)
 		}
 	}
 }

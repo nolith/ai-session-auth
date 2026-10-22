@@ -9,12 +9,13 @@ dependencies outside the standard library.
 
     cmd/geas/                  CLI dispatch, and the launcher's end-to-end tests
     internal/config/           the configuration: schema, validation, path expansion
-    internal/session/          one session's lifecycle: plan, start, acquire, teardown
+    internal/session/          one session's lifecycle: plan, start, acquire, teardown,
+                               and the reaper process
     internal/api/              the HTTPS client every provider request goes through
     internal/secretfile/       owner-only files: atomic writes, locks, the state directory
     internal/timing/           the GEAS_DEBUG=timing step log, cancellable waits
     internal/procenv/          the environment as a map, shared by the session and glab
-    internal/ledger/           revocable credentials on disk, one file per session
+    internal/ledger/           revocable credentials on disk, revoked across providers
     internal/provider/         the Provider interface, shared types
     internal/provider/gitlab/  one GitLab instance: its issuers, PATs, glab config
     internal/provider/github/  GitHub App tokens: state file, refresh, gh config
@@ -23,7 +24,6 @@ dependencies outside the standard library.
 Later phases add the rest of the end state:
 
     internal/provider/         the Renderer interface
-    internal/ledger/           the reaper
     internal/sessiondir/       the session directory, atomic writes, markers, gitconfig
     internal/credhelper/       `geas credential`, Git's credential helper
     internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
