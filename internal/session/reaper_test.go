@@ -11,6 +11,7 @@ import (
 
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/ledger"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -28,11 +29,15 @@ func reaperSession(t *testing.T, entry ledger.Entry) (string, *ledger.Ledger, st
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := ledger.NewID(time.Now())
+	id, err := sessiondir.NewID(time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	book, err := ledger.Create(id)
+	dir, err := sessiondir.Create(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book, err := ledger.Create(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +60,28 @@ func TestReaperTrustsTheLauncher(t *testing.T) {
 	}
 	if open, err := book.Unrevoked(); err != nil || len(open) != 1 {
 		t.Fatalf("ledger: %+v %v", open, err)
+	}
+}
+
+// A session with nothing to revoke, such as GitHub's alone, still leaves its
+// directory, and the credentials in it, to the reaper.
+func TestReaperRemovesASessionWithNothingToRevoke(t *testing.T) {
+	path, book, glab := reaperSession(t, ledger.Entry{Provider: "gitlab:gitlab.com", Name: "geas-x", ID: 42, Revoked: true})
+	dir, err := sessiondir.Open(book.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dir.WriteFile("secrets/github:github.com", []byte("ghu_secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err = watch(context.Background(), strings.NewReader(""), path, book.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if calls := testutil.Calls(t, glab); len(calls) != 0 {
+		t.Fatalf("glab calls: %q", calls)
+	}
+	if _, err := os.Stat(dir.Path()); !os.IsNotExist(err) {
+		t.Fatalf("session directory left: %v", err)
 	}
 }
 
@@ -99,5 +126,9 @@ func TestReaperRefusesAnUnknownProvider(t *testing.T) {
 	}
 	if open, err := book.Unrevoked(); err != nil || len(open) != 1 {
 		t.Fatalf("ledger: %+v %v", open, err)
+	}
+	// Kept as evidence, and for whoever can revoke it.
+	if _, err := sessiondir.Open(book.ID()); err != nil {
+		t.Fatalf("session directory: %v", err)
 	}
 }

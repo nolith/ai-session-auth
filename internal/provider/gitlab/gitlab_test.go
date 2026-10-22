@@ -18,6 +18,7 @@ import (
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/ledger"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -74,11 +75,15 @@ func lookupAnswers(t *testing.T, query, user string, answers map[string]any, ids
 func testLedger(t *testing.T) *ledger.Ledger {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	id, err := ledger.NewID(time.Now())
+	id, err := sessiondir.NewID(time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := ledger.Create(id)
+	dir, err := sessiondir.Create(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := ledger.Create(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

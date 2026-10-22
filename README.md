@@ -285,15 +285,18 @@ launcher revokes before printing anything, survives an output that has gone
 away, and runs glab in its own process group so that the hangup cannot
 interrupt a revocation.
 
-Every PAT is in the session's ledger before it exists:
-`$XDG_STATE_HOME/geas/sessions/<session id>/ledger`
-(`~/.local/state/geas/sessions/` by default), owner-only, records the PAT's
-name before the request that mints it and its ID once it is resolved. The
-launcher revokes what the ledger lists, and removes the session's directory
-once nothing is left.
+Each session has a directory of its own,
+`$XDG_STATE_HOME/geas/sessions/<session id>`
+(`~/.local/state/geas/sessions/` by default), owner-only (mode 700), whose
+files are replaced atomically. Every PAT is in the session's ledger there
+before it exists: the `ledger` file records the PAT's name before the
+request that mints it and its ID once it is resolved. The launcher revokes
+what the ledger lists, and removes the session's directory once nothing is
+left; a directory whose ledger still lists something stays, for the reaper
+and as evidence.
 
 Some terminals do not wait: closing a herdr pane follows SIGHUP and SIGTERM
-with SIGKILL about half a second later. Before minting, the launcher therefore
+with SIGKILL about half a second later. Before acquiring any credential, the launcher therefore
 starts a reaper (`geas _reaper`) in a new session, detached twice so
 that it is outside the pane's process tree. It receives only the configuration
 path and the session ID, and waits on a pipe whose write end only the
@@ -303,7 +306,7 @@ signal or its own revocation failed, the reaper revokes every PAT the ledger
 still lists through the issuer: it finds the PAT by name when the launcher died
 before resolving its ID, and checks that the ID still names the session PAT.
 It retries after 10 seconds and a minute if needed, removes the session's
-directory once nothing is left, and logs what it did to
+directory once nothing is left (also for a session that minted nothing), and logs what it did to
 `$XDG_STATE_HOME/geas/reaper.log`
 (`~/.local/state/geas/reaper.log` by default), never to a terminal.
 

@@ -24,6 +24,7 @@ import (
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -137,9 +138,10 @@ var displayName = map[string]string{"gitlab": "GitLab", "github": "GitHub"}
 
 // teardown revokes every unrevoked ledger entry through the provider that
 // created it, in parallel across providers. Once nothing is left it tells the
-// reaper and removes the session's directory; otherwise the reaper, reading
-// the ledger, retries what failed.
-func teardown(book *ledger.Ledger, providers []provider.Provider, reaper *os.File, output io.Writer) {
+// reaper and removes the session's directory; otherwise the directory stays,
+// as evidence and for the reaper, which reads the ledger and retries what
+// failed.
+func teardown(dir *sessiondir.Dir, book *ledger.Ledger, providers []provider.Provider, reaper *os.File, output io.Writer) {
 	if reaper != nil {
 		defer reaper.Close()
 	}
@@ -175,9 +177,9 @@ func teardown(book *ledger.Ledger, providers []provider.Provider, reaper *os.Fil
 			failed[kind] = true
 		}
 	}
+	book.Close()
 	if err != nil || len(failed) > 0 {
-		// The ledger stays: it names what is left to revoke.
-		book.Close()
+		// The directory stays: its ledger names what is left to revoke.
 		if err != nil {
 			for _, p := range providers {
 				failed[p.Kind()] = true
@@ -191,10 +193,21 @@ func teardown(book *ledger.Ledger, providers []provider.Provider, reaper *os.Fil
 	if reaper != nil {
 		reaper.WriteString(reaperDone)
 	}
-	book.Remove()
+	dir.Remove()
 	for _, kind := range slices.Sorted(maps.Keys(revoked)) {
 		fmt.Fprintln(output, displayName[kind]+" session PAT revoked.")
 	}
+}
+
+// mark records how far a provider got, for the credential helper and, later,
+// geas status. A marker that cannot be written leaves the provider pending,
+// which the helper reports as unavailable too.
+func mark(dir *sessiondir.Dir, id, skipped string) {
+	m := sessiondir.Marker{State: sessiondir.Ready, Time: time.Now().UTC()}
+	if skipped != "" {
+		m = sessiondir.Marker{State: sessiondir.Failed, Reason: skipped, Time: m.Time}
+	}
+	dir.SetMarker(id, m)
 }
 
 // Run runs one session around args: it resolves the providers' credentials,
@@ -231,8 +244,20 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 				return 1, err
 			}
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-			gl = nil
+			// Kept for its ID and configuration, never asked for a credential.
+			gl = &gitlab.Provider{Config: settings.GitLab}
 		}
+	}
+	var gh *github.Provider
+	if config.Enabled(settings.GitHub.Enabled) {
+		gh = github.New(settings.GitHub, api)
+	}
+	var providers []provider.Provider
+	if gl != nil {
+		providers = append(providers, gl)
+	}
+	if gh != nil {
+		providers = append(providers, gh)
 	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
 	directory, err := os.MkdirTemp("/tmp", "geas-")
@@ -245,37 +270,43 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if err != nil {
 		return 1, err
 	}
-	var gh provider.Provider
+	id, err := sessiondir.NewID(time.Now())
+	if err != nil {
+		return 1, err
+	}
+	dir, err := sessiondir.Create(id)
+	if err != nil {
+		return 1, err
+	}
+	book, err := ledger.Create(dir)
+	if err != nil {
+		dir.Remove()
+		return 1, err
+	}
+	// The reaper's pipe: closed without "revoked", it revokes the ledger
+	// itself and removes the session's directory.
+	var reaper *os.File
+	defer func() { teardown(dir, book, providers, reaper, output) }()
+	// Before any credential exists: whatever the ledger will list, and the
+	// directory the credentials land in, the reaper cleans up if the launcher
+	// cannot.
+	if reaper, err = startReaper(binary, settings.Source(), id); err != nil {
+		return 1, err
+	}
 	var githubCredential provider.Credential
-	if config.Enabled(settings.GitHub.Enabled) {
-		gh = github.New(settings.GitHub, api)
-		githubCredential, err = gh.Acquire(ctx, nil)
+	if gh != nil {
+		githubCredential, err = gh.Acquire(ctx, book)
 		timer.Step("GitHub token")
 		if err != nil {
 			if githubSkipped = skippable(ctx, settings.GitHub.Optional, err); githubSkipped == "" {
 				return 1, err
 			}
 			skip(output, "GitHub", githubSkipped, "geas github-login")
-			gh = nil
 		}
-	}
-	// The reaper's pipe: closed without "revoked", it revokes the ledger itself.
-	var reaper *os.File
-	var book *ledger.Ledger
-	if gl != nil {
-		defer func() {
-			if book == nil {
-				return
-			}
-			providers := []provider.Provider{gl}
-			if gh != nil {
-				providers = append(providers, gh)
-			}
-			teardown(book, providers, reaper, output)
-		}()
+		mark(dir, gh.ID(), githubSkipped)
 	}
 	sessionBroker := &broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
-	if gh != nil {
+	if gh != nil && githubSkipped == "" {
 		// The broker reads the state file on every request, as another
 		// session may rotate the token there.
 		sessionBroker.GitHubToken = func(ctx context.Context) (string, error) {
@@ -289,19 +320,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		return 1, err
 	}
 	defer server.close()
-	if gl != nil {
-		id, err := ledger.NewID(time.Now())
-		if err != nil {
-			return 1, err
-		}
-		if book, err = ledger.Create(id); err != nil {
-			return 1, err
-		}
-		// Before the mint: whatever the ledger will list, the reaper revokes
-		// if the launcher cannot.
-		if reaper, err = startReaper(binary, settings.Source(), id); err != nil {
-			return 1, err
-		}
+	if gl != nil && gitlabSkipped == "" {
 		credential, err := gl.Acquire(ctx, book)
 		// Skipped only before a PAT exists: a failure after the mint stops the
 		// session, as it always has. The ledger revokes the PAT either way.
@@ -318,6 +337,9 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		if err != nil {
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
 		}
+	}
+	if gl != nil {
+		mark(dir, gl.ID(), gitlabSkipped)
 	}
 	if (githubSkipped != "" || !config.Enabled(settings.GitHub.Enabled)) && (gitlabSkipped != "" || !config.Enabled(settings.GitLab.Enabled)) {
 		fmt.Fprintln(output, "Session ready without credentials: every enabled provider was skipped.")

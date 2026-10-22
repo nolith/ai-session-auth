@@ -15,6 +15,7 @@ dependencies outside the standard library.
     internal/secretfile/       owner-only files: atomic writes, locks, the state directory
     internal/timing/           the GEAS_DEBUG=timing step log, cancellable waits
     internal/procenv/          the environment as a map, shared by the session and glab
+    internal/sessiondir/       the session directory: atomic writes, markers
     internal/ledger/           revocable credentials on disk, revoked across providers
     internal/provider/         the Provider interface, shared types
     internal/provider/gitlab/  one GitLab instance: its issuers, PATs, glab config
@@ -24,7 +25,7 @@ dependencies outside the standard library.
 Later phases add the rest of the end state:
 
     internal/provider/         the Renderer interface
-    internal/sessiondir/       the session directory, atomic writes, markers, gitconfig
+    internal/sessiondir/       the session gitconfig
     internal/credhelper/       `geas credential`, Git's credential helper
     internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
     internal/sshgrant/         the human side: grant, show, drop, enroll, list-cas

@@ -8,42 +8,28 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nolith/geas/internal/sessiondir"
 )
 
 func newLedger(t *testing.T) (*Ledger, string) {
 	t.Helper()
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
-	id, err := NewID(time.Date(2026, 10, 22, 21, 34, 5, 0, time.UTC))
+	id, err := sessiondir.NewID(time.Date(2026, 10, 22, 21, 34, 5, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := Create(id)
+	dir, err := sessiondir.Create(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := Create(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
 	return l, filepath.Join(state, "geas", "sessions", id)
-}
-
-func TestSessionID(t *testing.T) {
-	id, err := NewID(time.Date(2026, 10, 22, 23, 34, 5, 0, time.FixedZone("CEST", 2*3600)))
-	if err != nil || !sessionID.MatchString(id) || id[:17] != "20261022T213405Z-" {
-		t.Fatalf("%q %v", id, err)
-	}
-	other, _ := NewID(time.Date(2026, 10, 22, 21, 34, 5, 0, time.UTC))
-	if other == id {
-		t.Fatal("two sessions in one second share an ID")
-	}
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	for _, bad := range []string{"", "..", "../20261022T213405Z-0011223344556677", "20261022T213405Z-00112233", "20261022T213405Z-0011223344556677/x"} {
-		if _, err := Create(bad); err == nil {
-			t.Errorf("created a ledger for %q", bad)
-		}
-		if _, err := Open(bad); err == nil {
-			t.Errorf("opened a ledger for %q", bad)
-		}
-	}
 }
 
 func TestCreateIsOwnerOnlyAndExclusive(t *testing.T) {
@@ -54,8 +40,8 @@ func TestCreateIsOwnerOnlyAndExclusive(t *testing.T) {
 			t.Errorf("%s: %v %v", path, info.Mode(), err)
 		}
 	}
-	if _, err := Create(l.ID()); err == nil {
-		t.Fatal("a second session took the same ID")
+	if _, err := Create(l.dir); err == nil {
+		t.Fatal("a second ledger in the same session")
 	}
 }
 
@@ -106,7 +92,7 @@ func TestTornLineIsSkipped(t *testing.T) {
 	}
 	file.WriteString(`{"provider":"gitlab:gitlab.com","na`)
 	file.Close()
-	reaper, err := Open(l.ID())
+	reaper, err := Open(l.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,21 +111,8 @@ func TestOpenRefusesAnUnsafeLedger(t *testing.T) {
 	if err := os.Chmod(filepath.Join(dir, "ledger"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(l.ID()); err == nil {
+	if _, err := Open(l.dir); err == nil {
 		t.Fatal("opened a world-readable ledger")
-	}
-}
-
-func TestRemove(t *testing.T) {
-	l, dir := newLedger(t)
-	if err := l.Record(Entry{Provider: "gitlab:gitlab.com", Name: "geas-a", Revoked: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := l.Remove(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("session directory left: %v", err)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/secretfile"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -145,16 +146,19 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 		logf(session, "cannot load the configuration: %v", err)
 		return err
 	}
-	providers, err := revokers(settings)
-	if err != nil {
-		logf(session, "cannot prepare the issuer: %v", err)
-		return err
-	}
+	// An issuer that cannot be prepared matters only if the ledger lists
+	// something for it to revoke; the directory goes either way.
+	providers, prepareErr := revokers(settings)
 	message, _ := io.ReadAll(io.LimitReader(launcher, int64(len(reaperDone))+1))
 	if string(message) == reaperDone {
 		return nil
 	}
-	book, err := ledger.Open(sessionID)
+	dir, err := sessiondir.Open(sessionID)
+	if err != nil {
+		logf(session, "cannot open the session directory: %v", err)
+		return err
+	}
+	book, err := ledger.Open(dir)
 	if err != nil {
 		logf(session, "cannot read the ledger: %v", err)
 		return err
@@ -164,6 +168,11 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 		book.Close()
 		logf(session, "cannot read the ledger: %v", err)
 		return err
+	}
+	if len(pending) > 0 && prepareErr != nil {
+		book.Close()
+		logf(session, "cannot prepare the issuer: %v", prepareErr)
+		return prepareErr
 	}
 	// Retrying cannot revoke an entry whose provider is gone or whose ID
 	// names another credential; it stays in the ledger.
@@ -211,10 +220,9 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 	for _, e := range pending {
 		entryf(e, "giving up; the PAT expires at its configured UTC date")
 	}
+	book.Close()
 	if len(pending) > 0 || refused {
-		book.Close()
 		return err
 	}
-	book.Remove()
-	return nil
+	return dir.Remove()
 }
