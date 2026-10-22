@@ -1,4 +1,4 @@
-package main
+package github
 
 import (
 	"context"
@@ -33,13 +33,19 @@ type OAuthResponse struct {
 	Error            string `json:"error"`
 	Interval         int64  `json:"interval"`
 }
-type GitHub struct {
+type Provider struct {
 	Config config.GitHubConfig
 	API    *api.API
 	Now    func() time.Time
 }
 
-func (g *GitHub) save(response OAuthResponse) (GitHubState, error) {
+// New returns the GitHub provider for config: it reads the state file a
+// github-login wrote, and refreshes the App token when it is about to expire.
+func New(config config.GitHubConfig, a *api.API) *Provider {
+	return &Provider{Config: config, API: a, Now: time.Now}
+}
+
+func (g *Provider) save(response OAuthResponse) (GitHubState, error) {
 	var state GitHubState
 	if response.Error != "" || response.RefreshToken == "" || response.ExpiresIn <= 0 || response.RefreshExpiresIn <= 0 || !strings.HasPrefix(response.AccessToken, "ghu_") {
 		return state, errors.New("GitHub did not return expiring App user tokens; check App settings")
@@ -51,7 +57,7 @@ func (g *GitHub) save(response OAuthResponse) (GitHubState, error) {
 	}
 	return state, nil
 }
-func (g *GitHub) verify(ctx context.Context, token string) error {
+func (g *Provider) Verify(ctx context.Context, token string) error {
 	var user struct {
 		Login string `json:"login"`
 	}
@@ -63,7 +69,7 @@ func (g *GitHub) verify(ctx context.Context, token string) error {
 	}
 	return nil
 }
-func (g *GitHub) token(ctx context.Context) (string, error) {
+func (g *Provider) Token(ctx context.Context) (string, error) {
 	var token string
 	err := secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
 		raw, err := secretfile.Read(g.Config.StateFile)
@@ -106,7 +112,7 @@ func (g *GitHub) token(ctx context.Context) (string, error) {
 	})
 	return token, err
 }
-func (g *GitHub) login(ctx context.Context, output io.Writer) error {
+func (g *Provider) Login(ctx context.Context, output io.Writer) error {
 	return secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
 		var device struct {
 			DeviceCode      string `json:"device_code"`
@@ -144,7 +150,7 @@ func (g *GitHub) login(ctx context.Context, output io.Writer) error {
 				continue
 			case "":
 				// Verify the user before replacing a previously authorized account.
-				if err := g.verify(ctx, response.AccessToken); err != nil {
+				if err := g.Verify(ctx, response.AccessToken); err != nil {
 					return err
 				}
 				if _, err := g.save(response); err != nil {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -104,7 +105,7 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := environmentMap(values)
+	env := procenv.Map(values)
 	for _, key := range []string{"GH_TOKEN", "GITLAB_TOKEN", "SSH_AUTH_SOCK"} {
 		if _, ok := env[key]; ok {
 			t.Errorf("inherited %s", key)
@@ -687,9 +688,10 @@ echo harness done`
 		t.Error("the gh wrapper reached the real gh")
 	}
 	// The issuer's lookup, and nothing after it: no PAT, so no reaper and no
-	// revocation; the glab wrapper never reached the real glab.
+	// revocation; the glab wrapper never reached the real glab. The lookup
+	// document itself is pinned in internal/provider/gitlab.
 	calls := testutil.Calls(t, fakes)
-	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(testutil.GlabConfig())}) {
+	if len(calls) != 1 || len(calls[0]) != 6 || calls[0][3] != "graphql" || !strings.HasPrefix(calls[0][5], "query=query SessionLookup") {
 		t.Errorf("glab calls: %q", calls)
 	}
 }

@@ -9,10 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -70,8 +70,7 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		if !config.Enabled(settings.GitHub.Enabled) {
 			return 1, errors.New("GitHub is disabled")
 		}
-		github := &GitHub{Config: settings.GitHub, API: api, Now: time.Now}
-		return 0, github.login(ctx, os.Stdout)
+		return 0, github.New(settings.GitHub, api).Login(ctx, os.Stdout)
 	case "save-gitlab-issuer":
 		if !config.Enabled(settings.GitLab.Enabled) {
 			return 1, errors.New("GitLab is disabled")

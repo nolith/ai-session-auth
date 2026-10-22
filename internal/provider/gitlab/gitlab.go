@@ -1,4 +1,4 @@
-package main
+package gitlab
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -64,7 +65,7 @@ type glabIssuer struct {
 var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "GEAS_SOCKET", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
 func newGlabIssuer() (glabIssuer, error) {
-	executable, err := executableLookup("glab")
+	executable, err := exec.LookPath("glab")
 	if err != nil {
 		return glabIssuer{}, errors.New("install glab and add it to PATH")
 	}
@@ -112,11 +113,11 @@ func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 		// Its own process group: the SIGHUP of a closing terminal, or another
 		// Ctrl-C, must not cut a revocation short.
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		environment := environmentMap(os.Environ())
+		environment := procenv.Map(os.Environ())
 		for _, key := range glabUnset {
 			delete(environment, key)
 		}
-		command.Env = environmentList(environment)
+		command.Env = procenv.List(environment)
 		output, err := command.Output()
 		if err != nil {
 			// glab's output may quote the response; keep it out of the logs.
@@ -132,27 +133,27 @@ func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	})
 }
 
-// sessionPAT names a PAT this session created; ID is 0 until it is resolved.
-type sessionPAT struct {
+// PAT names one token this session created; ID is 0 until it is resolved.
+type PAT struct {
 	Name string
 	ID   int64
 }
-type GitLab struct {
+type Provider struct {
 	Config  config.GitLabConfig
 	Issuer  issuer
-	Created []sessionPAT
+	Created []PAT
 	Now     func() time.Time
 	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
 	Steps *timing.Timer
 }
 
-func newGitLab(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*GitLab, error) {
+func New(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*Provider, error) {
 	if host.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
 			return nil, err
 		}
-		return &GitLab{Config: host, Issuer: glab, Now: time.Now, Steps: steps}, nil
+		return &Provider{Config: host, Issuer: glab, Now: time.Now, Steps: steps}, nil
 	}
 	raw, err := secretfile.Read(host.IssuerTokenFile)
 	if err != nil {
@@ -162,9 +163,9 @@ func newGitLab(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*GitL
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &GitLab{Config: host, Issuer: bearerIssuer{client: a, token: token}, Now: time.Now, Steps: steps}, nil
+	return &Provider{Config: host, Issuer: bearerIssuer{client: a, token: token}, Now: time.Now, Steps: steps}, nil
 }
-func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
+func (g *Provider) Create(ctx context.Context, duration time.Duration) (string, error) {
 	if err := config.ValidateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
@@ -206,7 +207,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	}
 	// The mutation returns no ID. Resolving it now leaves a single DELETE for
 	// the exit, which may have little time, and gives the reaper its target.
-	g.Created = append(g.Created, sessionPAT{Name: name})
+	g.Created = append(g.Created, PAT{Name: name})
 	id, err := g.find(ctx, name)
 	g.Steps.Step("id lookup")
 	if err != nil {
@@ -281,7 +282,7 @@ func parseGlobalID(value, model string) (int64, error) {
 // lookup resolves the user and every configured namespace in one request, and
 // refuses a path that does not resolve, as the REST lookups did. The earlier
 // format resolves its project IDs instead.
-func (g *GitLab) lookup(ctx context.Context) (lookup, error) {
+func (g *Provider) lookup(ctx context.Context) (lookup, error) {
 	var answer struct {
 		Errors []any                      `json:"errors"`
 		Data   map[string]json.RawMessage `json:"data"`
@@ -382,7 +383,7 @@ func projectNodes(data map[string]json.RawMessage) ([]namespace, error) {
 // and projects are refused unless GitLab reported the same path, so a renamed
 // or mistyped namespace stops the session before any PAT exists. The earlier
 // format lists project IDs and scopes itself; only the paths are checked.
-func (g *GitLab) scopes(resolved lookup) ([]config.Scope, error) {
+func (g *Provider) scopes(resolved lookup) ([]config.Scope, error) {
 	if !g.Config.Namespaced() {
 		paths := map[string]bool{}
 		for _, project := range resolved.projects {
@@ -436,7 +437,7 @@ func findDocument(name string) string {
 
 // find resolves a PAT's numeric ID by name, for the revocation: the mutation
 // returns no ID. A name that matches more than one token is refused.
-func (g *GitLab) find(ctx context.Context, name string) (int64, error) {
+func (g *Provider) find(ctx context.Context, name string) (int64, error) {
 	var answer struct {
 		Errors []any `json:"errors"`
 		Data   struct {
@@ -474,7 +475,7 @@ func (g *GitLab) find(ctx context.Context, name string) (int64, error) {
 	}
 	return id, nil
 }
-func (g *GitLab) revokeCreated(ctx context.Context) error {
+func (g *Provider) RevokeCreated(ctx context.Context) error {
 	for len(g.Created) > 0 {
 		pat := g.Created[0]
 		if pat.ID == 0 {
@@ -492,12 +493,12 @@ func (g *GitLab) revokeCreated(ctx context.Context) error {
 	return nil
 }
 
-var errOtherPAT = errors.New("the PAT ID names another token; not revoking it")
+var ErrOtherPAT = errors.New("the PAT ID names another token; not revoking it")
 
 // revokeChecked revokes a session PAT by ID once GitLab confirms that the ID
 // still names it. One already revoked or expired is left alone, so a launcher
 // that revoked just before dying causes no second DELETE.
-func (g *GitLab) revokeChecked(ctx context.Context, pat sessionPAT) (bool, error) {
+func (g *Provider) RevokeChecked(ctx context.Context, pat PAT) (bool, error) {
 	var current struct {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
@@ -506,7 +507,7 @@ func (g *GitLab) revokeChecked(ctx context.Context, pat sessionPAT) (bool, error
 		return false, err
 	}
 	if current.Name != pat.Name {
-		return false, errOtherPAT
+		return false, ErrOtherPAT
 	}
 	if !current.Active {
 		return false, nil

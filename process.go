@@ -8,36 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/procenv"
 )
 
-func environmentMap(values []string) map[string]string {
-	result := map[string]string{}
-	for _, value := range values {
-		key, v, ok := strings.Cut(value, "=")
-		if ok {
-			result[key] = v
-		}
-	}
-	return result
-}
-func environmentList(values map[string]string) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	result := make([]string, 0, len(keys))
-	for _, key := range keys {
-		result = append(result, key+"="+values[key])
-	}
-	return result
-}
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 func appendGitConfig(env map[string]string, entries [][2]string) error {
 	count := 0
@@ -61,7 +39,7 @@ func appendGitConfig(env map[string]string, entries [][2]string) error {
 var inheritedCredentials = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
 func sessionEnvironment(settings config.Config, directory, address, binary string, base []string, lookup func(string) (string, error)) ([]string, error) {
-	env := environmentMap(base)
+	env := procenv.Map(base)
 	for _, key := range inheritedCredentials {
 		delete(env, key)
 	}
@@ -125,7 +103,7 @@ func sessionEnvironment(settings config.Config, directory, address, binary strin
 	if err := appendGitConfig(env, entries); err != nil {
 		return nil, err
 	}
-	return environmentList(env), nil
+	return procenv.List(env), nil
 }
 
 // proxyMark is set for the real CLI and everything it starts. Entering the
@@ -162,7 +140,7 @@ func proxyCLI(service, executable string, args []string) error {
 	if response.Token == "" {
 		return errors.New("broker did not return a token")
 	}
-	environment := environmentMap(os.Environ())
+	environment := procenv.Map(os.Environ())
 	key := "GH_TOKEN"
 	if service == "gitlab" {
 		key = "GITLAB_TOKEN"
@@ -172,7 +150,7 @@ func proxyCLI(service, executable string, args []string) error {
 	// The recorded CLI may be a shim, such as mise's, that runs the next one on
 	// PATH: without the wrappers there, that is never the wrapper again.
 	environment["PATH"] = pathWithout(environment["PATH"], filepath.Join(filepath.Dir(os.Getenv("GEAS_SOCKET")), "bin"))
-	return syscall.Exec(executable, append([]string{executable}, args...), environmentList(environment))
+	return syscall.Exec(executable, append([]string{executable}, args...), procenv.List(environment))
 }
 func credentialWith(operation string, input io.Reader, output io.Writer, request func(BrokerRequest) (BrokerResponse, error)) error {
 	if operation != "get" {

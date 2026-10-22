@@ -14,6 +14,8 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/provider/github"
+	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -140,9 +142,9 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 	var githubSkipped, gitlabSkipped string
 	// Before the session's own wrappers exist: a glab issuer resolves the glab
 	// on your PATH.
-	var gitlab *GitLab
+	var gl *gitlab.Provider
 	if config.Enabled(settings.GitLab.Enabled) {
-		gitlab, err = newGitLab(settings.GitLab, api, timer)
+		gl, err = gitlab.New(settings.GitLab, api, timer)
 		if err != nil {
 			// A missing glab is setup, like a missing gh; an unreadable issuer
 			// file is a credential, like GitHub's state file.
@@ -153,7 +155,7 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 				return 1, err
 			}
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-			gitlab = nil
+			gl = nil
 		}
 	}
 	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
@@ -167,12 +169,12 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 	if err != nil {
 		return 1, err
 	}
-	var github *GitHub
+	var gh *github.Provider
 	if config.Enabled(settings.GitHub.Enabled) {
-		github = &GitHub{Config: settings.GitHub, API: api, Now: time.Now}
-		token, err := github.token(ctx)
+		gh = github.New(settings.GitHub, api)
+		token, err := gh.Token(ctx)
 		if err == nil {
-			err = github.verify(ctx, token)
+			err = gh.Verify(ctx, token)
 		}
 		timer.Step("GitHub token")
 		if err != nil {
@@ -180,22 +182,22 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 				return 1, err
 			}
 			skip(output, "GitHub", githubSkipped, "geas github-login")
-			github = nil
+			gh = nil
 		}
 	}
 	// The reaper's pipe: closed without "revoked", it revokes the PAT itself.
 	var reaper *os.File
-	if gitlab != nil {
+	if gl != nil {
 		defer func() {
 			if reaper != nil {
 				defer reaper.Close()
 			}
-			if len(gitlab.Created) == 0 {
+			if len(gl.Created) == 0 {
 				return
 			}
 			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := gitlab.revokeCreated(cleanup); err != nil {
+			if err := gl.RevokeCreated(cleanup); err != nil {
 				if reaper != nil {
 					fmt.Fprintln(output, "WARNING: GitLab revocation failed; the reaper retries it, see "+reaperLogPath()+".")
 				} else {
@@ -210,8 +212,8 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 		}()
 	}
 	broker := &Broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
-	if github != nil {
-		broker.GitHubToken = github.token
+	if gh != nil {
+		broker.GitHubToken = gh.Token
 	}
 	// Bind before creating a PAT: failure to create a socket must not mint a token.
 	server, err := startBroker(ctx, address, broker)
@@ -219,12 +221,12 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 		return 1, err
 	}
 	defer server.close()
-	if gitlab != nil {
-		token, createErr := gitlab.create(ctx, settings.Duration())
+	if gl != nil {
+		token, createErr := gl.Create(ctx, settings.Duration())
 		err = createErr
 		// Skipped only before a PAT exists: one that was minted is revoked at
 		// exit, which a skipped provider never needs.
-		if err != nil && len(gitlab.Created) == 0 {
+		if err != nil && len(gl.Created) == 0 {
 			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
 		}
 		broker.mu.Lock()
@@ -236,7 +238,7 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 		}
 		if err != nil {
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-		} else if reaper, err = startReaper(binary, settings.Source(), gitlab.Created[0]); err != nil {
+		} else if reaper, err = startReaper(binary, settings.Source(), gl.Created[0]); err != nil {
 			return 1, err
 		}
 	}

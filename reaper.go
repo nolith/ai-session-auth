@@ -14,6 +14,8 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -40,7 +42,7 @@ func reaperLogPath() string {
 // which starts the reaper itself and exits: the reaper is then neither a
 // descendant of the launcher nor in its session. It returns the write end of
 // the reaper's pipe.
-func startReaper(binary, configPath string, pat sessionPAT) (*os.File, error) {
+func startReaper(binary, configPath string, pat gitlab.PAT) (*os.File, error) {
 	if configPath == "" || pat.ID <= 0 {
 		return nil, errors.New("cannot start the revocation reaper")
 	}
@@ -52,11 +54,11 @@ func startReaper(binary, configPath string, pat sessionPAT) (*os.File, error) {
 	defer read.Close()
 	command := exec.Command(binary, "_reaper", "detach", configPath, pat.Name, strconv.FormatInt(pat.ID, 10))
 	command.Dir = "/"
-	environment := environmentMap(os.Environ())
+	environment := procenv.Map(os.Environ())
 	for _, key := range inheritedCredentials {
 		delete(environment, key)
 	}
-	command.Env = environmentList(environment)
+	command.Env = procenv.List(environment)
 	command.ExtraFiles = []*os.File{read}
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// Returns once the detaching leader has started the reaper and exited.
@@ -89,13 +91,13 @@ func runReaper(ctx context.Context, args []string) error {
 		command.ExtraFiles = []*os.File{launcher}
 		return command.Start()
 	case "watch":
-		return watch(ctx, launcher, args[1], sessionPAT{Name: args[2], ID: id})
+		return watch(ctx, launcher, args[1], gitlab.PAT{Name: args[2], ID: id})
 	}
 	return errors.New("invalid reaper invocation")
 }
 
 // watch logs to reaperLogPath(), never to a terminal, and only when it acts.
-func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessionPAT) error {
+func watch(ctx context.Context, launcher io.Reader, configPath string, pat gitlab.PAT) error {
 	logf := func(format string, args ...any) {
 		if os.MkdirAll(filepath.Dir(reaperLogPath()), 0700) != nil {
 			return
@@ -114,7 +116,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 		logf("cannot load the configuration: %v", err)
 		return err
 	}
-	gitlab, err := newGitLab(settings.GitLab, api.New(), nil)
+	gl, err := gitlab.New(settings.GitLab, api.New(), nil)
 	if err != nil {
 		logf("cannot prepare the issuer: %v", err)
 		return err
@@ -128,7 +130,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 			break
 		}
 		attempt, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		revoked, revokeErr := gitlab.revokeChecked(attempt, pat)
+		revoked, revokeErr := gl.RevokeChecked(attempt, pat)
 		cancel()
 		switch {
 		case revokeErr == nil && revoked:
@@ -137,7 +139,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 		case revokeErr == nil:
 			logf("launcher gone; already revoked or expired")
 			return nil
-		case errors.Is(revokeErr, errOtherPAT):
+		case errors.Is(revokeErr, gitlab.ErrOtherPAT):
 			logf("%v", revokeErr)
 			return revokeErr
 		}
