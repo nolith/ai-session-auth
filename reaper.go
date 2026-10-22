@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 // The reaper revokes the session PAT when the launcher no longer can. A closing
@@ -104,12 +106,12 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 	}
 	// Prepared before waiting, so that later changes to the configuration or
 	// PATH cannot prevent the revocation.
-	config, err := loadConfig(configPath)
+	settings, err := config.Load(configPath)
 	if err != nil {
 		logf("cannot load the configuration: %v", err)
 		return err
 	}
-	gitlab, err := newGitLab(config.GitLab, newAPI(), nil)
+	gitlab, err := newGitLab(settings.GitLab, newAPI(), nil)
 	if err != nil {
 		logf("cannot prepare the issuer: %v", err)
 		return err

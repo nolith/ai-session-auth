@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 func environmentMap(values []string) map[string]string {
@@ -58,7 +60,7 @@ func appendGitConfig(env map[string]string, entries [][2]string) error {
 // inheritedCredentials never reach the harness or the reaper.
 var inheritedCredentials = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
-func sessionEnvironment(config Config, directory, address, binary string, base []string, lookup func(string) (string, error)) ([]string, error) {
+func sessionEnvironment(settings config.Config, directory, address, binary string, base []string, lookup func(string) (string, error)) ([]string, error) {
 	env := environmentMap(base)
 	for _, key := range inheritedCredentials {
 		delete(env, key)
@@ -72,7 +74,7 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 	for _, provider := range []struct {
 		service, cli string
 		active       bool
-	}{{"github", "gh", enabled(config.GitHub.Enabled)}, {"gitlab", "glab", enabled(config.GitLab.Enabled)}} {
+	}{{"github", "gh", config.Enabled(settings.GitHub.Enabled)}, {"gitlab", "glab", config.Enabled(settings.GitLab.Enabled)}} {
 		if !provider.active {
 			continue
 		}
@@ -113,7 +115,7 @@ func sessionEnvironment(config Config, directory, address, binary string, base [
 	for _, provider := range []struct {
 		host   string
 		active bool
-	}{{"github.com", enabled(config.GitHub.Enabled)}, {"gitlab.com", enabled(config.GitLab.Enabled)}} {
+	}{{"github.com", config.Enabled(settings.GitHub.Enabled)}, {"gitlab.com", config.Enabled(settings.GitLab.Enabled)}} {
 		if provider.active {
 			for _, prefix := range []string{"git@" + provider.host + ":", "ssh://git@" + provider.host + "/"} {
 				entries = append(entries, [2]string{"url.https://" + provider.host + "/.insteadOf", prefix})

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 type GitHubState struct {
@@ -29,7 +31,7 @@ type OAuthResponse struct {
 	Interval         int64  `json:"interval"`
 }
 type GitHub struct {
-	Config GitHubConfig
+	Config config.GitHubConfig
 	API    *API
 	Now    func() time.Time
 }

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 func TestBrokerRepositoryBoundaries(t *testing.T) {
@@ -297,7 +299,7 @@ func TestBrokerGitHubOwners(t *testing.T) {
 		t.Fatal("owner not allowed without repositories")
 	}
 	// GitLab stays case-sensitive whatever the GitHub owners.
-	if gitlabAllowed(GitLabConfig{Groups: []string{"nolith"}}, "NOLITH/project") {
+	if gitlabAllowed(config.GitLabConfig{Groups: []string{"nolith"}}, "NOLITH/project") {
 		t.Fatal("GitLab group matched in another case")
 	}
 }
@@ -336,14 +338,14 @@ func startSession(t *testing.T, script string) *testSession {
 	t.Helper()
 	s := &testSession{glab: fakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
-	c := Config{SessionHours: 1, GitHub: GitHubConfig{Enabled: boolPointer(false)}, GitLab: glabConfig()}
+	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: boolPointer(false)}, GitLab: glabConfig()}
 	raw, _ := json.Marshal(c)
-	config := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(config, raw, 0600); err != nil {
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	started := filepath.Join(dir, "harness.pid")
-	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; " + script})
+	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; " + script})
 	read, write, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -654,11 +656,11 @@ func optionalSession(t *testing.T, github, gitlab bool, script string) (string, 
 	c.GitLab = glabConfig()
 	c.GitLab.Optional = gitlab
 	raw, _ := json.Marshal(c)
-	config := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(config, raw, 0600); err != nil {
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := json.Marshal([]string{"--config", config, "run", "--", "/bin/sh", "-c", script})
+	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", script})
 	launcher := exec.Command(os.Args[0])
 	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
 	output, err := launcher.CombinedOutput()

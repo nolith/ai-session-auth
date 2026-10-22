@@ -1,4 +1,7 @@
-package main
+// Package config reads the configuration file and checks it: the schema, the
+// validation every provider relies on, and the path expansion that turns the
+// configuration's relative and ~-prefixed paths into absolute ones.
+package config
 
 import (
 	"encoding/json"
@@ -50,13 +53,23 @@ type Config struct {
 	source       string       // absolute path, for the reaper to load it again
 }
 
-// namespaced reports whether the GitLab allowlist names groups, personal
+// Namespaced reports whether the GitLab allowlist names groups, personal
 // projects and project paths, whose IDs are resolved at session start.
-func (c GitLabConfig) namespaced() bool {
+func (c GitLabConfig) Namespaced() bool {
 	return len(c.Groups) > 0 || c.PersonalProjects || len(c.Projects) > 0 || len(c.Permissions) > 0
 }
-func enabled(value *bool) bool           { return value == nil || *value }
-func (c Config) duration() time.Duration { return time.Duration(c.SessionHours * float64(time.Hour)) }
+
+// Enabled reports whether a provider's enabled field is on: it is nil unless
+// the configuration turns the provider off.
+func Enabled(value *bool) bool { return value == nil || *value }
+
+// Duration is the session's length.
+func (c Config) Duration() time.Duration { return time.Duration(c.SessionHours * float64(time.Hour)) }
+
+// Source is the configuration's absolute path, which the reaper loads again
+// from its own process.
+func (c Config) Source() string { return c.source }
+
 func expandPath(value, base string) (string, error) {
 	if value == "~" || strings.HasPrefix(value, "~/") {
 		home, err := os.UserHomeDir()
@@ -70,7 +83,7 @@ func expandPath(value, base string) (string, error) {
 	}
 	return filepath.Clean(value), nil
 }
-func loadConfig(path string) (Config, error) {
+func Load(path string) (Config, error) {
 	var config Config
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -94,13 +107,13 @@ func loadConfig(path string) (Config, error) {
 	}
 	config.source = absolute
 	base := filepath.Dir(absolute)
-	if enabled(config.GitHub.Enabled) {
+	if Enabled(config.GitHub.Enabled) {
 		config.GitHub.StateFile, err = expandPath(config.GitHub.StateFile, base)
 		if err != nil {
 			return config, err
 		}
 	}
-	if enabled(config.GitLab.Enabled) && config.GitLab.IssuerTokenFile != "" {
+	if Enabled(config.GitLab.Enabled) && config.GitLab.IssuerTokenFile != "" {
 		config.GitLab.IssuerTokenFile, err = expandPath(config.GitLab.IssuerTokenFile, base)
 		if err != nil {
 			return config, err
@@ -112,10 +125,10 @@ func (c Config) validate() error {
 	if math.IsNaN(c.SessionHours) || math.IsInf(c.SessionHours, 0) || c.SessionHours <= 0 || c.SessionHours > 48 {
 		return errors.New("session_hours must be greater than zero and at most 48")
 	}
-	if !enabled(c.GitHub.Enabled) && !enabled(c.GitLab.Enabled) {
+	if !Enabled(c.GitHub.Enabled) && !Enabled(c.GitLab.Enabled) {
 		return errors.New("enable at least one provider")
 	}
-	if enabled(c.GitHub.Enabled) {
+	if Enabled(c.GitHub.Enabled) {
 		if len(c.GitHub.Repositories) == 0 && len(c.GitHub.Owners) == 0 {
 			return errors.New("configure GitHub repositories or owners")
 		}
@@ -129,7 +142,7 @@ func (c Config) validate() error {
 			return errors.New("configure GitHub client_id, expected_user and state_file")
 		}
 	}
-	if enabled(c.GitLab.Enabled) {
+	if Enabled(c.GitLab.Enabled) {
 		if c.GitLab.ExpectedUser == "" {
 			return errors.New("configure GitLab expected_user")
 		}
@@ -145,7 +158,7 @@ func (c Config) validate() error {
 		default:
 			return errors.New(`GitLab issuer must be "glab" or omitted`)
 		}
-		if err := validateGitLabAllowlist(c.GitLab); err != nil {
+		if err := ValidateGitLabAllowlist(c.GitLab); err != nil {
 			return err
 		}
 	}
@@ -157,7 +170,7 @@ func (c Config) validate() error {
 func validatePaths(paths []string, project, fold bool) error {
 	seen := map[string]bool{}
 	for _, path := range paths {
-		normalized, ok := normalizeGitPath(path)
+		normalized, ok := NormalizeGitPath(path)
 		if !ok || normalized != path || strings.Contains(path, ":") || (project && !strings.Contains(path, "/")) {
 			if project {
 				return errors.New("repository paths must look like owner/repo or group/project")
@@ -181,7 +194,7 @@ func validatePaths(paths []string, project, fold bool) error {
 func validateOwners(owners []string) error {
 	seen := map[string]bool{}
 	for _, owner := range owners {
-		normalized, ok := normalizeGitPath(owner)
+		normalized, ok := NormalizeGitPath(owner)
 		if !ok || normalized != owner || strings.ContainsAny(owner, "/:*") {
 			return errors.New("GitHub owners must be an account or organization name, without slash or wildcard")
 		}
@@ -192,8 +205,12 @@ func validateOwners(owners []string) error {
 	}
 	return nil
 }
-func validateGitLabAllowlist(c GitLabConfig) error {
-	if !c.namespaced() {
+
+// ValidateGitLabAllowlist checks the GitLab allowlist, in either format, and
+// the permissions it asks for. The session and the provider both refuse a
+// session PAT that would be broader than the configuration.
+func ValidateGitLabAllowlist(c GitLabConfig) error {
+	if !c.Namespaced() {
 		if len(c.Repositories) == 0 {
 			return errors.New("configure GitLab groups, personal_projects or projects")
 		}
@@ -237,13 +254,13 @@ func validateScopes(c GitLabConfig) error {
 	if len(allowed) == 0 || len(c.Scopes) == 0 {
 		return errors.New("configure GitLab project_ids and granular_scopes")
 	}
-	return checkScopes(c.Scopes, allowed, false)
+	return CheckScopes(c.Scopes, allowed, false)
 }
 
-// checkScopes refuses what a session PAT must never get: PAT management, USER
+// CheckScopes refuses what a session PAT must never get: PAT management, USER
 // beyond read_user, resources outside allowed, and ALL_MEMBERSHIPS, INSTANCE or
 // (unless personal) PERSONAL_PROJECTS.
-func checkScopes(scopes []Scope, allowed map[string]bool, personal bool) error {
+func CheckScopes(scopes []Scope, allowed map[string]bool, personal bool) error {
 	for _, scope := range scopes {
 		switch scope.Access {
 		case "USER":
@@ -288,7 +305,12 @@ func checkPermissions(permissions []string) error {
 	}
 	return nil
 }
-func normalizeGitPath(path string) (string, bool) {
+
+// NormalizeGitPath accepts a canonical Git path, as a repository's owner or
+// group path is written in a URL or in the configuration, and refuses
+// anything that could name another repository: empty segments, ".", "..",
+// escapes and separators.
+func NormalizeGitPath(path string) (string, bool) {
 	if path == "" || strings.ContainsAny(path, "%\\\r\n?#\x00") {
 		return "", false
 	}
@@ -301,7 +323,11 @@ func normalizeGitPath(path string) (string, bool) {
 	}
 	return path, true
 }
-func expiryForDuration(now time.Time, duration time.Duration) string {
+
+// ExpiryForDuration is the UTC date a session PAT may live until: the
+// requested duration rounded up to the next midnight, so a token never
+// expires in the middle of a session.
+func ExpiryForDuration(now time.Time, duration time.Duration) string {
 	target := now.UTC().Add(duration)
 	midnight := time.Date(target.Year(), target.Month(), target.Day(), 0, 0, 0, 0, time.UTC)
 	// Exact midnight already covers the requested duration.

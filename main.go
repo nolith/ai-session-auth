@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 func usage(output io.Writer) {
@@ -55,23 +57,23 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		return 2, errors.New("specify a command")
 	}
 	timer := newStepTimer(os.Getenv("GEAS_DEBUG"), os.Stderr)
-	config, err := loadConfig(*path)
+	settings, err := config.Load(*path)
 	timer.step("config load")
 	if err != nil {
 		return 1, err
 	}
 	switch rest[0] {
 	case "github-login":
-		if !enabled(config.GitHub.Enabled) {
+		if !config.Enabled(settings.GitHub.Enabled) {
 			return 1, errors.New("GitHub is disabled")
 		}
-		github := &GitHub{Config: config.GitHub, API: api, Now: time.Now}
+		github := &GitHub{Config: settings.GitHub, API: api, Now: time.Now}
 		return 0, github.login(ctx, os.Stdout)
 	case "save-gitlab-issuer":
-		if !enabled(config.GitLab.Enabled) {
+		if !config.Enabled(settings.GitLab.Enabled) {
 			return 1, errors.New("GitLab is disabled")
 		}
-		if config.GitLab.Issuer == "glab" {
+		if settings.GitLab.Issuer == "glab" {
 			return 1, errors.New(`GitLab issuer is "glab": your glab login, with no PAT to save`)
 		}
 		fromStdin := len(rest) == 2 && rest[1] == "--stdin"
@@ -82,7 +84,7 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if err = atomicWrite(config.GitLab.IssuerTokenFile, []byte(token+"\n")); err != nil {
+		if err = atomicWrite(settings.GitLab.IssuerTokenFile, []byte(token+"\n")); err != nil {
 			return 1, errors.New("cannot save GitLab issuer")
 		}
 		fmt.Fprintln(os.Stdout, "Issuer saved with mode 600.")
@@ -92,7 +94,7 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		if len(command) > 0 && command[0] == "--" {
 			command = command[1:]
 		}
-		return runSession(ctx, config, command, api, os.Stderr, timer)
+		return runSession(ctx, settings, command, api, os.Stderr, timer)
 	default:
 		return 2, errors.New("unknown command")
 	}

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 const createPAT = `mutation AgentToken($input: PersonalAccessTokenCreateInput!) {
@@ -143,7 +145,7 @@ type sessionPAT struct {
 	ID   int64
 }
 type GitLab struct {
-	Config  GitLabConfig
+	Config  config.GitLabConfig
 	Issuer  issuer
 	Created []sessionPAT
 	Now     func() time.Time
@@ -151,15 +153,15 @@ type GitLab struct {
 	Steps *stepTimer
 }
 
-func newGitLab(config GitLabConfig, api *API, steps *stepTimer) (*GitLab, error) {
-	if config.Issuer == "glab" {
+func newGitLab(host config.GitLabConfig, api *API, steps *stepTimer) (*GitLab, error) {
+	if host.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
 			return nil, err
 		}
-		return &GitLab{Config: config, Issuer: glab, Now: time.Now, Steps: steps}, nil
+		return &GitLab{Config: host, Issuer: glab, Now: time.Now, Steps: steps}, nil
 	}
-	raw, err := privateRead(config.IssuerTokenFile)
+	raw, err := privateRead(host.IssuerTokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +169,10 @@ func newGitLab(config GitLabConfig, api *API, steps *stepTimer) (*GitLab, error)
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &GitLab{Config: config, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now, Steps: steps}, nil
+	return &GitLab{Config: host, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now, Steps: steps}, nil
 }
 func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
-	if err := validateGitLabAllowlist(g.Config); err != nil {
+	if err := config.ValidateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
 	resolved, err := g.lookup(ctx)
@@ -191,7 +193,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	}
 	name := "geas-" + hex.EncodeToString(random)
 	variables := map[string]any{"input": map[string]any{
-		"name": name, "expiresAt": expiryForDuration(g.Now(), duration), "granularScopes": scopes,
+		"name": name, "expiresAt": config.ExpiryForDuration(g.Now(), duration), "granularScopes": scopes,
 	}}
 	var result struct {
 		Errors []any `json:"errors"`
@@ -245,10 +247,10 @@ type namespace struct {
 // The paths are written into the document as escaped string literals: an alias
 // needs one literal argument each, and the glab issuer carries only objects and
 // arrays in its -F variables, never the scalar a $path variable would need.
-func lookupDocument(c GitLabConfig) string {
+func lookupDocument(c config.GitLabConfig) string {
 	var b strings.Builder
 	b.WriteString("query SessionLookup {\n  currentUser { username }\n")
-	if !c.namespaced() {
+	if !c.Namespaced() {
 		ids := make([]string, 0, len(c.ProjectIDs))
 		for _, id := range c.ProjectIDs {
 			ids = append(ids, graphqlString(fmt.Sprintf("gid://gitlab/Project/%d", id)))
@@ -304,7 +306,7 @@ func (g *GitLab) lookup(ctx context.Context) (lookup, error) {
 		return lookup{}, err
 	}
 	resolved := lookup{user: user.Username}
-	if !g.Config.namespaced() {
+	if !g.Config.Namespaced() {
 		projects, err := projectNodes(answer.Data)
 		if err != nil {
 			return lookup{}, err
@@ -387,8 +389,8 @@ func projectNodes(data map[string]json.RawMessage) ([]namespace, error) {
 // and projects are refused unless GitLab reported the same path, so a renamed
 // or mistyped namespace stops the session before any PAT exists. The earlier
 // format lists project IDs and scopes itself; only the paths are checked.
-func (g *GitLab) scopes(resolved lookup) ([]Scope, error) {
-	if !g.Config.namespaced() {
+func (g *GitLab) scopes(resolved lookup) ([]config.Scope, error) {
+	if !g.Config.Namespaced() {
 		paths := map[string]bool{}
 		for _, project := range resolved.projects {
 			paths[project.fullPath] = true
@@ -412,7 +414,7 @@ func (g *GitLab) scopes(resolved lookup) ([]Scope, error) {
 		}
 	}
 	scopes := namespacedScopes(g.Config, ids)
-	if err := checkScopes(scopes, allowed, g.Config.PersonalProjects); err != nil {
+	if err := config.CheckScopes(scopes, allowed, g.Config.PersonalProjects); err != nil {
 		return nil, err
 	}
 	return scopes, nil
@@ -421,13 +423,13 @@ func (g *GitLab) scopes(resolved lookup) ([]Scope, error) {
 // namespacedScopes grants read_user, to verify the user, and the permissions
 // on each resolved group and project and on personal projects when enabled.
 // A group covers its subgroups and their projects.
-func namespacedScopes(c GitLabConfig, resourceIDs []string) []Scope {
-	scopes := []Scope{{Access: "USER", Permissions: []string{"read_user"}}}
+func namespacedScopes(c config.GitLabConfig, resourceIDs []string) []config.Scope {
+	scopes := []config.Scope{{Access: "USER", Permissions: []string{"read_user"}}}
 	if len(resourceIDs) > 0 {
-		scopes = append(scopes, Scope{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: resourceIDs, Permissions: c.Permissions})
+		scopes = append(scopes, config.Scope{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: resourceIDs, Permissions: c.Permissions})
 	}
 	if c.PersonalProjects {
-		scopes = append(scopes, Scope{Access: "PERSONAL_PROJECTS", Permissions: c.Permissions})
+		scopes = append(scopes, config.Scope{Access: "PERSONAL_PROJECTS", Permissions: c.Permissions})
 	}
 	return scopes
 }

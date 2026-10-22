@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nolith/geas/internal/config"
 )
 
 type BrokerRequest struct {
@@ -30,7 +32,7 @@ type BrokerResponse struct {
 }
 type Broker struct {
 	mu          sync.RWMutex
-	Config      Config
+	Config      config.Config
 	GitHubToken func(context.Context) (string, error)
 	GitLabToken string
 	// Why an optional provider was skipped at start; it then stays unavailable.
@@ -65,7 +67,7 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		default:
 			return BrokerResponse{}, nil
 		}
-		path, ok := normalizeGitPath(request.Path)
+		path, ok := config.NormalizeGitPath(request.Path)
 		if !ok {
 			return BrokerResponse{}, nil
 		}
@@ -107,7 +109,7 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 // githubAllowed reports whether a Git path is an allowed repository or inside
 // an allowed owner, by whole leading segment like gitlabAllowed. GitHub names
 // are case-insensitive, so the comparison is too.
-func githubAllowed(c GitHubConfig, path string) bool {
+func githubAllowed(c config.GitHubConfig, path string) bool {
 	if slices.ContainsFunc(c.Repositories, func(repo string) bool { return strings.EqualFold(repo, path) }) {
 		return true
 	}
@@ -120,7 +122,7 @@ func githubAllowed(c GitHubConfig, path string) bool {
 // gitlabAllowed reports whether a Git path is inside the configured namespaces:
 // whole leading segments only, so "gitlab-org" never matches "gitlab-org-foo".
 // Explicit projects and the earlier format's repositories match exactly.
-func gitlabAllowed(c GitLabConfig, path string) bool {
+func gitlabAllowed(c config.GitLabConfig, path string) bool {
 	if slices.Contains(c.Repositories, path) || slices.Contains(c.Projects, path) {
 		return true
 	}
