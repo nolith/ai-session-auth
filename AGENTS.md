@@ -5,10 +5,6 @@ agent), hands them to the tools that already read them, and revokes them when
 the session ends. Go module `github.com/nolith/geas`, binary `geas`, no
 dependencies outside the standard library.
 
-This repository is a jj (Jujutsu) workspace. Use `jj` for everything that
-writes, `jj describe` for a commit message and `jj new` for the next change,
-and pass `--no-pager` to every `jj` command.
-
 ## Where things live
 
     cmd/geas/                  CLI dispatch, and the launcher's end-to-end tests
@@ -63,7 +59,6 @@ Later phases add the rest of the end state:
 
     go list -deps ./internal/provider/... | grep internal/session   # must not match
 
-Run tests with `GOCACHE` set if Go cannot write its default build cache.
-Inside the agent sandbox `/bin/ps` is denied and the same five tests fail, the
-ones that run `ps`; everywhere else the suite is green. Do not tune those
-tests for the sandbox.
+Some launcher and reaper tests run `ps` to check process groups, so they fail
+where `ps` cannot run, such as inside a sandbox; `nix flake check` provides
+it. Do not tune those tests for a particular environment.
