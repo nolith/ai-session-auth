@@ -14,8 +14,10 @@ import (
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/provider/github"
+	"github.com/nolith/geas/internal/sandbox"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/session"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -27,6 +29,8 @@ Commands:
   save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600 (not with issuer "glab")
   run -- HARNESS [ARGS...]       Start a session with user credentials
   credential get                Git's credential helper, inside a session
+  sandbox check                 Inside a session: check that no protected path is
+                                readable and that the session directory is
 
 Requires gh, glab and Git in PATH for enabled providers. Linux/macOS only.`)
 }
@@ -46,6 +50,13 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 			return 2, errors.New("usage: geas credential get")
 		}
 		return 0, credhelper.Run(args[1], os.Stdin, os.Stdout)
+	}
+	// Run inside a session, as `geas credential` is.
+	if len(args) > 0 && args[0] == "sandbox" {
+		if len(args) != 2 || args[1] != "check" {
+			return 2, errors.New("usage: geas sandbox check")
+		}
+		return sandboxCheck(os.Stdout)
 	}
 	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -103,6 +114,21 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	default:
 		return 2, errors.New("unknown command")
 	}
+}
+
+// sandboxCheck runs the sandbox check for the session GEAS_SESSION_DIR
+// names, exiting 1 when a protected path is readable or the session
+// directory is not.
+func sandboxCheck(output io.Writer) (int, error) {
+	dir, err := sessiondir.FromEnv()
+	if err != nil {
+		return 1, err
+	}
+	ok, err := sandbox.Check(dir, output)
+	if err != nil || !ok {
+		return 1, err
+	}
+	return 0, nil
 }
 
 // sessionContext ends on Ctrl-C, SIGTERM, or SIGHUP from a closed terminal or

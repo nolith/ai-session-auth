@@ -360,6 +360,12 @@ does: `GLAB_CONFIG_DIR`, else `$XDG_CONFIG_HOME/glab-cli`, else the OS's user
 configuration directory (`~/Library/Application Support/glab-cli` on
 macOS); `GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`.
 
+`geas sandbox check`, run inside a session, tries to read every path the
+policy denies and the session directory, names each denied path it could
+read, and exits 1 if any was readable or the session directory was not.
+Run outside a sandbox, it fails by design: your own logins are readable
+there.
+
 The credential helper's allowlist controls where the helper returns tokens;
 it does not restrict the CLIs' API calls. GitLab enforces the group and
 project boundaries through the token's granular scopes. GitHub enforces the
