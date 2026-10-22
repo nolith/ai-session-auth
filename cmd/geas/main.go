@@ -27,20 +27,15 @@ func usage(output io.Writer) {
 Commands:
   github-login                  Authorize your GitHub App once via device flow
   save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600 (not with issuer "glab")
-  run -- HARNESS [ARGS...]       Start a session with user credentials
+  run -- HARNESS [ARGS...]       Start a session with user credentials; inside a
+                                session, run HARNESS in it
   credential get                Git's credential helper, inside a session
   sandbox check                 Inside a session: check that no protected path is
                                 readable and that the session directory is
 
-Requires gh, glab and Git in PATH for enabled providers. Linux/macOS only.`)
+Requires Git, and glab in PATH for the glab issuer. Linux/macOS only.`)
 }
 func execute(ctx context.Context, args []string, api *api.API) (int, error) {
-	if len(args) > 0 && args[0] == "_proxy" {
-		if len(args) < 3 {
-			return 1, errors.New("invalid proxy invocation")
-		}
-		return 1, session.ProxyCLI(args[1], args[2], args[3:])
-	}
 	if len(args) > 0 && args[0] == "_reaper" {
 		return 0, session.RunReaper(ctx, args[1:])
 	}
@@ -72,6 +67,11 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	if len(rest) == 0 {
 		usage(os.Stderr)
 		return 2, errors.New("specify a command")
+	}
+	// Inside a session, `run` shares it: the configuration may be out of the
+	// sandbox's reach, and the session already has its credentials.
+	if rest[0] == "run" && os.Getenv("GEAS_SESSION_DIR") != "" {
+		return 1, session.Nested(harness(rest[1:]))
 	}
 	timer := timing.New(os.Getenv("GEAS_DEBUG"), os.Stderr)
 	settings, err := config.Load(*path)
@@ -106,14 +106,18 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		fmt.Fprintln(os.Stdout, "Issuer saved with mode 600.")
 		return 0, nil
 	case "run":
-		command := rest[1:]
-		if len(command) > 0 && command[0] == "--" {
-			command = command[1:]
-		}
-		return session.Run(ctx, settings, command, api, os.Stderr, timer)
+		return session.Run(ctx, settings, harness(rest[1:]), api, os.Stderr, timer)
 	default:
 		return 2, errors.New("unknown command")
 	}
+}
+
+// harness is the command after `run`, without its "--".
+func harness(args []string) []string {
+	if len(args) > 0 && args[0] == "--" {
+		return args[1:]
+	}
+	return args
 }
 
 // sandboxCheck runs the sandbox check for the session GEAS_SESSION_DIR

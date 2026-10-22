@@ -11,12 +11,13 @@ repositories you allow.
 
 A Go launcher for GitHub.com and GitLab.com on Linux and macOS (amd64 and arm64).
 It has no external Go dependencies. Build with Go 1.23 or later; use the latest
-stable release where possible. Install `git`, `gh`, and `glab` in your `PATH`.
+stable release where possible. Install `git`; `gh` and `glab` are used from
+your `PATH` when present, and the glab issuer needs `glab`.
 
 ```bash
 git clone https://github.com/nolith/geas.git
 cd geas
-go build -o geas .
+go build -o geas ./cmd/geas
 ```
 
 The compiled binary does not require a Go runtime.
@@ -43,13 +44,16 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 
 - GitHub App **user access tokens**, acting as you rather than an installation bot.
 - Initial authorization through device flow, without a client secret or RSA key.
-- GitHub token refresh on demand, starting five minutes before expiry.
+- GitHub token refresh in the background, shortly before expiry, rewriting
+  the session's files atomically.
 - A new **personal fine-grained GitLab PAT** for each session, issued through
   your own `glab` login or a stored issuer PAT.
 - GitLab access restricted to selected groups, your personal projects or single
   projects, without PAT management permissions in the agent token.
 - Username verification on both providers before starting the harness.
-- `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
+- `gh` and `glab` configured from the session directory: the real binaries
+  run, from wherever `PATH` finds them, with the session's credentials in
+  their own configuration files. No wrappers, no `PATH` changes.
 - A Git credential helper, `geas credential`, that checks protocol, hostname,
   and repository path, and answers from the session directory.
 - SSH-to-HTTPS URL rewriting through a session gitconfig, included last from
@@ -57,6 +61,9 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - GitLab PAT revocation on normal exit, Ctrl-C, SIGTERM, SIGHUP (a closed
   terminal or pane), or the session time limit, and by a detached reaper when
   the launcher is killed outright.
+- A sandbox policy per session, from the paths each provider protects, as a
+  neutral file and a nono profile fragment, and `geas sandbox check` to
+  verify it from inside the sandbox.
 - Atomic GitHub state updates, private secret files, and locking across sessions.
 - No tokens in normal launcher output, command-line arguments, or Git URLs.
 
@@ -120,7 +127,7 @@ Every issuer request then runs `glab api --hostname gitlab.com ...`:
   gitlab.com: neither the current repository's remote nor glab's `:fullpath`
   style placeholders can redirect a request.
 - glab runs without `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`,
-  `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, `GEAS_SOCKET`, host overrides or HTTP
+  `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, host overrides or HTTP
   debugging, so it acts with your own login, never with a session's.
 - Calls are serialized through `$XDG_STATE_HOME/geas/glab.lock`
   (`~/.local/state/geas/glab.lock` by default). GitLab returns a
@@ -297,8 +304,8 @@ what the ledger lists, and removes the session's directory once nothing is
 left; a directory whose ledger still lists something stays, for the reaper
 and as evidence.
 
-Some terminals do not wait: closing a herdr pane follows SIGHUP and SIGTERM
-with SIGKILL about half a second later. Before acquiring any credential, the launcher therefore
+Some terminals do not wait: closing a terminal multiplexer's pane may follow
+SIGHUP and SIGTERM with SIGKILL about half a second later. Before acquiring any credential, the launcher therefore
 starts a reaper (`geas _reaper`) in a new session, detached twice so
 that it is outside the pane's process tree. It receives only the configuration
 path and the session ID, and waits on a pipe whose write end only the
@@ -314,13 +321,16 @@ directory once nothing is left (also for a session that minted nothing), and log
 
 If the computer shuts down, both processes are killed, or revocation keeps
 failing because of a network error, the PAT expires on its configured date.
-At the session limit, the broker stops issuing credentials and the launcher
-terminates the harness process group. Processes that deliberately detach from
+At the session limit, the launcher terminates the harness process group and
+removes the session directory, with the credentials in it. Processes that deliberately detach from
 that group are not guaranteed to stop.
 
 GitHub access tokens last eight hours, with rotating refresh tokens stored in
 persistent state. Concurrent sessions for the same App and user share the
-current GitHub credential; each wrapper retrieves it afresh. The launcher does
+current GitHub credential: shortly before it expires, each launcher refreshes
+it in the state file, under its lock (or picks up the token another session
+rotated there), and rewrites its own session's `gh/hosts.yml` and secret. A
+refresh that fails is retried every minute, silently. The launcher does
 not revoke GitHub credentials on exit, which would invalidate other sessions
 or the refresh token. A copied access token remains valid until its actual
 expiry or earlier invalidation by GitHub.
@@ -328,24 +338,69 @@ A running `gh` command cannot replace its token while it executes; restart
 long-running watch commands if they cross a token expiry or rotation.
 
 A skipped optional provider stays unavailable for the whole session, and never
-falls back to your own login: its wrapper, CLI configuration directory in
-the session and credential helper remain in place. `gh` or `glab` then fails with
-"GitHub is not available in this session: <reason>" (or GitLab) without
-running the real CLI, and Git HTTPS to an allowlisted repository on that host
-fails at once, with the helper telling Git to quit rather than ask a terminal
-or askpass program. A skipped GitLab mints no PAT, so its ledger stays empty
+falls back to your own login: `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` still point
+into the session directory, where no token arrives, so `gh` or `glab` reports
+that it is not logged in. The provider's marker records the reason, and Git
+HTTPS to an allowlisted repository on that host fails at once, with the helper
+telling Git to quit, with "<host> is not available in this session: <reason>",
+rather than ask a terminal or askpass program. A skipped GitLab mints no PAT, so its ledger stays empty
 and there is nothing to revoke at exit. Start a new session after fixing the login.
+
+## What the harness sees
+
+Inside a session, `geas run -- COMMAND` (with `GEAS_SESSION_DIR` set) runs
+COMMAND in place, sharing the session: it reads no configuration and mints
+nothing.
+
+The harness inherits the launcher's environment without `GH_TOKEN`,
+`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+`GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `CI_JOB_TOKEN`,
+`SSH_AUTH_SOCK`, `GH_DEBUG`, `GLAB_DEBUG` and `GLAB_DEBUG_HTTP`, and with:
+
+| Variable                                 | Example                                                                         | Set by      |
+| :--------------------------------------- | :------------------------------------------------------------------------------ | :---------- |
+| `GEAS_SESSION_DIR`                       | `~/.local/state/geas/sessions/20261023T001500Z-1f0c2a9b3e4d5c6a`                | the session |
+| `GEAS_SANDBOX_PROFILE`                   | `$GEAS_SESSION_DIR/sandbox/nono.json`                                           | the session |
+| `GIT_CONFIG_COUNT`, `_KEY_n`, `_VALUE_n` | one more entry, `include.path=$GEAS_SESSION_DIR/gitconfig`, after any inherited | the session |
+| `GIT_TERMINAL_PROMPT`                    | `0`                                                                             | the session |
+| `GLAB_CONFIG_DIR`                        | `$GEAS_SESSION_DIR/glab`                                                        | GitLab      |
+| `GH_CONFIG_DIR`                          | `$GEAS_SESSION_DIR/gh`                                                          | GitHub      |
+| `GH_PROMPT_DISABLED`                     | `1`                                                                             | GitHub      |
+
+`PATH` is unchanged. Two providers may set one variable only to the same
+value, and none may set one of the session's own; anything else stops the
+session before it starts.
+
+The session directory, owner-only (mode 700, every file mode 600, each
+replaced atomically):
+
+| File                            | Written by                                              | Read by                             |
+| :------------------------------ | :------------------------------------------------------ | :---------------------------------- |
+| `ledger`                        | the launcher, before each mint; the reaper              | the launcher and the reaper         |
+| `gitconfig`                     | the launcher, at start                                  | Git, through `include.path`         |
+| `git/hosts.json`                | the launcher, at start: hosts and allowlists            | `geas credential`                   |
+| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed | `geas credential`                   |
+| `markers/<provider>`            | the launcher: `ready`, or `failed` with the reason      | `geas credential`                   |
+| `glab/config.yml`               | the GitLab renderer, one entry per host                 | `glab`                              |
+| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                     | `gh`                                |
+| `sandbox/policy.json`           | the launcher, at start                                  | `geas sandbox check`                |
+| `sandbox/nono.json`             | the launcher, at start                                  | the sandbox, `GEAS_SANDBOX_PROFILE` |
+
+`<provider>` is a provider's ID, such as `gitlab:gitlab.com`. `glab` and `gh`
+may write their own files into their directories; a renderer replaces its
+files whole.
 
 ## Limits and isolation
 
 This launcher manages credential lifecycles; **it is not a sandbox**.
-The issuer PAT and refresh token are not passed to the harness. However, an
-agent running as your OS user with unrestricted access to your home directory
-can read the mode-600 secret files. With the glab issuer, it can likewise run
-the real `glab` with your login, by path or without the session's
-`GLAB_CONFIG_DIR` and `GITLAB_TOKEN`. Isolation requires a separate OS user,
-a sandbox that hides those paths, or an external broker. The session socket
-intentionally provides access to the temporary tokens.
+Isolation is the job of a sandbox around the harness, and each session tells
+it what to protect, as below. The issuer PAT and refresh token are not
+passed to the harness. Without such a sandbox, an agent running as your OS
+user can read the mode-600 secret files, your own `glab` and `gh` logins, and
+every session's directory; with the glab issuer, it can run `glab` with your
+login by unsetting `GLAB_CONFIG_DIR`. Isolation requires a sandbox that denies
+those paths, or a separate OS user. The session directory intentionally gives
+the harness its temporary tokens.
 
 Each session writes the paths a sandbox around the harness must protect into
 its directory: `sandbox/policy.json` lists them neutrally, `deny` (your glab
@@ -367,21 +422,30 @@ Run outside a sandbox, it fails by design: your own logins are readable
 there.
 
 The credential helper's allowlist controls where the helper returns tokens;
-it does not restrict the CLIs' API calls. GitLab enforces the group and
-project boundaries through the token's granular scopes. GitHub enforces the
-repositories accessible to the App: `github.owners` and `github.repositories`
-restrict Git credential delivery and do not further narrow the token's API
-access.
+it does not restrict API calls. The tokens themselves are the boundary:
+GitLab enforces the group and project boundaries through the session PAT's
+granular scopes, which name only the configured namespaces, and GitHub
+enforces the repositories the App is installed on and the App's permissions.
+`github.owners` and `github.repositories` restrict Git credential delivery
+and do not further narrow the token's API access.
 Install the App only on the required repositories.
 
-The harness must inherit `PATH`, `GEAS_SOCKET`, and `GIT_CONFIG_*`. A
-container without the socket mounted, or a shell that clears these variables,
-requires additional configuration. Calling `/usr/bin/gh` directly bypasses the
-wrapper. The real `gh` and `glab` run with the session's wrapper directory
-removed from `PATH`, so a version-manager shim, such as mise's, recorded as the
-real CLI and running the next one on `PATH` cannot loop back to the wrapper. A
-shim that calls the wrapper by its path fails with a "wrapper loop" error
-instead of spinning. `glab` and `gh` read their configuration from the
+Earlier versions handed `gh` and `glab` their tokens through wrappers that
+asked a session broker over a socket. That broker never restricted API calls
+either, but the tokens were harder to reach: a process had to ask the socket
+for one. Now any process in the session reads them from the session
+directory, can use them with any tool, and can copy them; a copied GitLab PAT
+works until it is revoked at exit, a copied GitHub token until it expires,
+within eight hours. The broker also stopped answering at the session limit;
+the launcher now removes the directory then. What a token can do has not
+changed: that is still the PAT's scopes and the App's installation.
+
+The harness must inherit `GEAS_SESSION_DIR`, `GLAB_CONFIG_DIR`,
+`GH_CONFIG_DIR` and `GIT_CONFIG_*`, and be able to read the session
+directory. A container without that directory mounted, or a shell that
+clears these variables, requires additional configuration. The real `gh` and
+`glab` run from wherever `PATH` finds them, version-manager shims included.
+`glab` and `gh` read their configuration from the
 session directory (`GLAB_CONFIG_DIR` and `GH_CONFIG_DIR` point there), where
 geas writes `glab/config.yml` and `gh/hosts.yml` with the session's
 credentials; personal aliases, extensions, and preferences are not copied.
@@ -412,22 +476,24 @@ nix flake check      # formatting, vet, race-enabled tests and the build
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
 fake `glab` (arguments, environment, locking, silent failures), group and
-project resolution, scope building, namespace, owner and repository allowlists, the
-Git credential protocol, PATH shims and the wrapper loop guard, URL rewriting
-with real Git, UNIX socket RPC, exit codes, process-group timeouts, revocation
-after SIGHUP with the output gone, the ledger, the reaper after SIGKILL (also
-during the mint, finding the PAT by name) and its silence after a clean exit, cancellable issuer input, and optional providers skipped
-with warnings while their wrappers and Git refuse, or stopping the session when
-required.
+project resolution, scope building, namespace, owner and repository
+allowlists, the session directory (modes, atomic writes, markers), the glab,
+gh, gitconfig, sandbox policy and nono renderers against golden files, the
+`Setup.Env` merge, each tool's configuration directory per override and per
+OS, the Git credential helper with real Git, the sandbox check, the GitHub
+refresh, exit codes, process-group timeouts, revocation after SIGHUP with the
+output gone, the ledger, the reaper after SIGKILL (also during the mint,
+finding the PAT by name) and its silence after a clean exit, nested sessions,
+cancellable issuer input, and optional providers skipped with warnings while
+Git refuses, or stopping the session when required.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:
-formatting, vet, race-enabled tests, and the build. All 15 tests passed on
-both platforms, including UNIX socket RPC.
+formatting, vet, race-enabled tests, and the build.
 
-The environment used to build the initial implementation prohibits UNIX socket
-creation, so the socket test is skipped there on EPERM/EACCES. The launcher
-requires an environment that allows UNIX sockets. Real authenticated provider
-flows require the setup above and have not been tested on your accounts.
+The golden files under `testdata/` follow what `glab` 1.123 and `gh` 2.102
+write themselves; both read the files back unchanged. Real authenticated
+provider flows require the setup above and have not been tested on your
+accounts.
 
 The GitHub state and configuration formats are compatible with the previous
 Python launcher, so existing files can be reused. Keep OAuth state and PATs

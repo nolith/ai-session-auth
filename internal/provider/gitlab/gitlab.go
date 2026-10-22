@@ -57,15 +57,14 @@ func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[s
 // glabIssuer delegates to the user's own glab login, which renews its OAuth
 // token itself, so revocation still works hours after the session started.
 type glabIssuer struct {
-	executable string // absolute, resolved before the session PATH exists
+	executable string // absolute, resolved once, at the start
 	lockPath   string // withFileLock adds ".lock": one OAuth refresh at a time
 }
 
 // glabUnset keeps the issuer on the user's own gitlab.com login: no token or
-// temporary config from an enclosing session (without GEAS_SOCKET, that
-// session's glab wrapper fails instead of answering), no host override, and no
+// session configuration from an enclosing session, no host override, and no
 // HTTP debugging, which prints credentials.
-var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "GEAS_SOCKET", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
+var glabUnset = []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "GLAB_ENABLE_CI_AUTOLOGIN", "GLAB_CONFIG_DIR", "GITLAB_HOST", "GITLAB_URI", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
 func newGlabIssuer() (glabIssuer, error) {
 	executable, err := exec.LookPath("glab")

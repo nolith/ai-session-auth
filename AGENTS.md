@@ -9,8 +9,8 @@ dependencies outside the standard library.
 
     cmd/geas/                  CLI dispatch, and the launcher's end-to-end tests
     internal/config/           the configuration: schema, validation, path expansion
-    internal/session/          one session's lifecycle: plan, start, acquire, teardown,
-                               and the reaper process
+    internal/session/          one session's lifecycle: plan, start, acquire, refresh,
+                               teardown, and the reaper process
     internal/api/              the HTTPS client every provider request goes through
     internal/secretfile/       owner-only files: atomic writes, locks, the state directory
     internal/timing/           the GEAS_DEBUG=timing step log, cancellable waits
@@ -48,6 +48,9 @@ Later phases add the rest of the end state:
   what several providers or the session itself act on.
 - The binary, the flags, the output, the configuration format and the files
   on disk are the contract. Behaviour changes are their own change.
+- What runs inside a session (`geas credential`, `geas sandbox check`, a
+  nested `geas run`) finds it through `GEAS_SESSION_DIR` and never reads the
+  configuration, which the sandbox may hide.
 - Nothing prints to the terminal once the harness owns it: a background
   warning would scribble over the agent's TUI. Failures go to markers, to
   the reaper's log, and to `geas status`.
@@ -65,7 +68,7 @@ Later phases add the rest of the end state:
 
     nix flake check -L  # authoritative: formatting, vet, race tests, build
 
-    go list -deps ./internal/provider/... | grep internal/session   # must not match
+    go list -deps ./internal/provider/... | grep 'internal/session$'   # must not match
 
 Some launcher and reaper tests run `ps` to check process groups, so they fail
 where `ps` cannot run, such as inside a sandbox; `nix flake check` provides

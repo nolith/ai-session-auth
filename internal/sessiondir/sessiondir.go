@@ -141,6 +141,10 @@ func (d *Dir) WriteFile(rel string, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	// Never recreate a session's directory once it is removed.
+	if _, err = os.Lstat(d.path); err != nil {
+		return err
+	}
 	return secretfile.Write(path, raw)
 }
 

@@ -25,7 +25,7 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 
 // TestMain lets a test re-execute this binary as the launcher itself, with
 // main's own signal handling, by passing its arguments as JSON. The launcher
-// re-executes it too, as "_reaper" or "_proxy", and Git as "credential".
+// re-executes it too, as "_reaper", and Git as "credential".
 func TestMain(m *testing.M) {
 	if raw, ok := os.LookupEnv("GEAS_TEST_ARGS"); ok {
 		os.Unsetenv("GEAS_TEST_ARGS")
@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 		os.Args = append([]string{"geas"}, args...)
 		main()
 	}
-	// The launcher's own re-executions: the reaper, gh/glab through _proxy,
-	// and Git's credential helper.
+	// The launcher's own re-executions: the reaper, and Git's credential
+	// helper.
 	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential") {
 		main()
 	}
@@ -108,9 +108,6 @@ func startSession(t *testing.T, script string) *testSession {
 				return s
 			}
 			output, _ := io.ReadAll(s.output)
-			if strings.Contains(string(output), "UNIX socket") {
-				t.Skip("runtime prohibits UNIX sockets")
-			}
 			t.Fatalf("launcher exited before the harness started: %v %s", err, output)
 		case <-deadline:
 			s.launcher.Process.Kill()
@@ -357,7 +354,7 @@ func TestLauncherKilledDuringMintIsReaped(t *testing.T) {
 func optionalSession(t *testing.T, github, gitlab bool, script string) (string, int, string) {
 	t.Helper()
 	fakes := testutil.FakeGlab(t)
-	gh := "#!/bin/sh\ntouch " + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
+	gh := "#!/bin/sh\necho \"GH_CONFIG_DIR=$GH_CONFIG_DIR GH_TOKEN=${GH_TOKEN-unset}\" >" + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
 	if err := os.WriteFile(filepath.Join(fakes, "gh"), []byte(gh), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -377,9 +374,6 @@ func optionalSession(t *testing.T, github, gitlab bool, script string) (string, 
 	launcher := exec.Command(os.Args[0])
 	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
 	output, err := launcher.CombinedOutput()
-	if strings.Contains(string(output), "UNIX socket") {
-		t.Skip("runtime prohibits UNIX sockets")
-	}
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {
 		t.Fatal(err)
@@ -387,10 +381,13 @@ func optionalSession(t *testing.T, github, gitlab bool, script string) (string, 
 	return string(output), launcher.ProcessState.ExitCode(), fakes
 }
 
-// With every provider optional and failing, the harness still starts, and the
-// wrappers and Git refuse instead of reaching the real CLIs or a prompt.
+// With every provider optional and failing, the harness still starts. gh
+// and glab are the real ones, configured from the session directory, where
+// no token arrived, and Git refuses instead of reaching a prompt.
 func TestOptionalProvidersAreSkipped(t *testing.T) {
-	script := `gh api user; echo "gh exit $?"; glab api user; echo "glab exit $?"
+	script := `gh api user; echo "gh exit $?"
+case "$GLAB_CONFIG_DIR" in "$GEAS_SESSION_DIR"/glab) echo "glab configured in the session" ;; esac
+[ -e "$GLAB_CONFIG_DIR/config.yml" ] || echo "no glab token"
 if command -v git >/dev/null; then
 	printf 'protocol=https\nhost=gitlab.com\npath=group/project.git\n\n' | git credential fill
 fi
@@ -403,29 +400,56 @@ echo harness done`
 		"WARNING: GitHub is not available in this session: run github-login before starting a session. Fix: geas github-login\n",
 		"WARNING: GitLab is not available in this session: glab issuer request failed. Fix: glab auth login\n",
 		"Session ready without credentials",
-		"geas: GitHub is not available in this session: run github-login before starting a session\ngh exit 1\n",
-		"geas: GitLab is not available in this session: glab issuer request failed\nglab exit 1\n",
+		"gh exit 0\n",
+		"glab configured in the session\n",
+		"no glab token\n",
 		"harness done\n",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output lacks %q:\n%s", want, output)
 		}
 	}
-	if _, err := exec.LookPath("git"); err == nil && !strings.Contains(output, "told us to quit") {
+	if _, err := exec.LookPath("git"); err == nil && (!strings.Contains(output, "told us to quit") || !strings.Contains(output, "gitlab.com is not available in this session: glab issuer request failed")) {
 		t.Errorf("Git did not stop at the helper:\n%s", output)
 	}
 	if strings.Contains(output, "glab-secret") {
 		t.Errorf("issuer output leaked:\n%s", output)
 	}
-	if _, err := os.Stat(filepath.Join(fakes, "gh-called")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("the gh wrapper reached the real gh")
+	// The real gh ran with the session's configuration directory and no
+	// token of yours.
+	raw, err := os.ReadFile(filepath.Join(fakes, "gh-called"))
+	if err != nil || !strings.Contains(string(raw), "/geas/sessions/") || !strings.HasSuffix(string(raw), "/gh GH_TOKEN=unset\n") {
+		t.Errorf("gh: %q %v", raw, err)
 	}
-	// The issuer's lookup, and nothing after it: no PAT, so no reaper and no
-	// revocation; the glab wrapper never reached the real glab. The lookup
-	// document itself is pinned in internal/provider/gitlab.
+	// The issuer's lookup, and nothing after it: no PAT, so nothing to
+	// revoke. The lookup document itself is pinned in internal/provider/gitlab.
 	calls := testutil.Calls(t, fakes)
 	if len(calls) != 1 || len(calls[0]) != 6 || calls[0][3] != "graphql" || !strings.HasPrefix(calls[0][5], "query=query SessionLookup") {
 		t.Errorf("glab calls: %q", calls)
+	}
+}
+
+// Inside a session, `geas run` runs the command in place, sharing the
+// session: no configuration is read, nothing is minted.
+func TestNestedRunSharesTheSession(t *testing.T) {
+	dir := testutil.SessionDir(t)
+	out := filepath.Join(t.TempDir(), "out")
+	args, _ := json.Marshal([]string{"--config", "/nonexistent/config.json", "run", "--", "/bin/sh", "-c", "echo \"$GEAS_SESSION_DIR\" >" + shellQuote(out) + "; exit 7"})
+	launcher := exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "GEAS_SESSION_DIR="+dir.Path())
+	output, _ := launcher.CombinedOutput()
+	if code := launcher.ProcessState.ExitCode(); code != 7 {
+		t.Fatalf("exit %d: %s", code, output)
+	}
+	if raw, err := os.ReadFile(out); err != nil || string(raw) != dir.Path()+"\n" {
+		t.Fatalf("harness saw %q %v", raw, err)
+	}
+	// A GEAS_SESSION_DIR naming no session is refused, not trusted.
+	launcher = exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "GEAS_SESSION_DIR="+filepath.Join(t.TempDir(), "20261022T213405Z-0011223344556677"))
+	output, _ = launcher.CombinedOutput()
+	if code := launcher.ProcessState.ExitCode(); code != 1 || !strings.Contains(string(output), "unset GEAS_SESSION_DIR to start a new session") {
+		t.Fatalf("stale session: exit %d: %s", code, output)
 	}
 }
 

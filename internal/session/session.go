@@ -1,7 +1,7 @@
-// Package session runs one session: it starts the revocation reaper, resolves
-// the credentials the harness needs, hands it an environment that reads them,
-// and revokes them when it exits. The broker and the CLI wrappers it still
-// carries are temporary.
+// Package session runs one session: it creates the session directory and
+// starts the revocation reaper, resolves the credentials the harness needs
+// into that directory, hands the harness an environment that reads them, and
+// revokes them when it exits.
 package session
 
 import (
@@ -13,8 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"slices"
+	"sync"
 	"syscall"
 	"time"
 
@@ -226,12 +226,10 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if settings.GitLab.Issuer == "glab" {
 		gitlabFix = "glab auth login"
 	}
-	// A skipped optional provider keeps its wrapper, configuration directory
-	// and credential helper, whose answer is then an error, from its marker:
+	// A skipped optional provider keeps its configuration directory and
+	// credential helper, whose answer is then an error, from its marker:
 	// never your own credentials.
 	var githubSkipped, gitlabSkipped string
-	// Before the session's own wrappers exist: a glab issuer resolves the glab
-	// on your PATH.
 	var gl *gitlab.Provider
 	if config.Enabled(settings.GitLab.Enabled) {
 		gl, err = gitlab.New(settings.GitLab, settings.Duration(), api, timer)
@@ -294,15 +292,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		dir.Remove()
 		return 1, err
 	}
-	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
-	directory, err := os.MkdirTemp("/tmp", "geas-")
-	if err != nil {
-		dir.Remove()
-		return 1, err
-	}
-	defer os.RemoveAll(directory)
-	address := filepath.Join(directory, "broker.sock")
-	environment, err := sessionEnvironment(settings, directory, address, binary, os.Environ(), executableLookup, dir, exported)
+	environment, err := sessionEnvironment(os.Environ(), dir, exported)
 	if err != nil {
 		dir.Remove()
 		return 1, err
@@ -332,21 +322,6 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		}
 		mark(dir, gh.ID(), githubSkipped)
 	}
-	sessionBroker := &broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
-	if gh != nil && githubSkipped == "" {
-		// The broker reads the state file on every request, as another
-		// session may rotate the token there.
-		sessionBroker.GitHubToken = func(ctx context.Context) (string, error) {
-			c, err := gh.Refresh(ctx, githubCredential)
-			return c.Secret, err
-		}
-	}
-	// Bind before creating a PAT: failure to create a socket must not mint a token.
-	server, err := startBroker(ctx, address, sessionBroker)
-	if err != nil {
-		return 1, err
-	}
-	defer server.close()
 	if gl != nil && gitlabSkipped == "" {
 		credential, err := gl.Acquire(ctx, book)
 		// Skipped only before a PAT exists: a failure after the mint stops the
@@ -354,10 +329,6 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		if err != nil && !errors.As(err, new(provider.CreatedError)) {
 			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
 		}
-		sessionBroker.mu.Lock()
-		sessionBroker.GitLabToken = credential.Secret
-		sessionBroker.GitLabSkipped = gitlabSkipped
-		sessionBroker.mu.Unlock()
 		if err != nil && gitlabSkipped == "" {
 			return 1, err
 		}
@@ -376,5 +347,46 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		fmt.Fprintln(output, "Session ready: user credentials available through gh/glab and Git HTTPS.")
 	}
 	timer.Stop()
+	// Stopped, and waited for, before teardown removes the directory it
+	// writes into.
+	refreshing, stop := context.WithCancel(ctx)
+	var refreshers sync.WaitGroup
+	defer func() { stop(); refreshers.Wait() }()
+	if gh != nil && githubSkipped == "" {
+		refreshers.Add(1)
+		go func() {
+			defer refreshers.Done()
+			keepFresh(refreshing, store, gh, githubCredential)
+		}()
+	}
 	return runHarness(ctx, args, environment, settings.Duration())
+}
+
+// refreshMargin is how long before a credential expires keepFresh replaces
+// it: inside the five minutes in which GitHub's provider rotates its token.
+// refreshRetry is the pause after a refresh that failed or changed nothing.
+var refreshMargin, refreshRetry = 4 * time.Minute, time.Minute
+
+// keepFresh replaces c in the session directory before it expires, for as
+// long as ctx lasts: a GitHub App token lasts eight hours, a session up to
+// 48. Another session may have rotated the token already; Refresh then
+// returns that one. A failure keeps the current credential and retries;
+// nothing prints, as the harness owns the terminal.
+func keepFresh(ctx context.Context, store *credentials, p provider.Provider, c provider.Credential) {
+	for {
+		wait := time.Until(c.Expires.Add(-refreshMargin))
+		if wait < refreshRetry {
+			wait = refreshRetry
+		}
+		if timing.SleepContext(ctx, wait) != nil {
+			return
+		}
+		next, err := p.Refresh(ctx, c)
+		if err != nil || !next.Expires.After(c.Expires) || ctx.Err() != nil {
+			continue
+		}
+		if store.put(p, next) == nil {
+			c = next
+		}
+	}
 }

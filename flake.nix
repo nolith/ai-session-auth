@@ -48,7 +48,7 @@
             "-w"
           ];
 
-          # The tests run real Git, ps, /bin/sh and UNIX sockets.
+          # The tests run real Git, ps and /bin/sh.
           nativeCheckInputs = [
             pkgs.gitMinimal
             pkgs.ps

@@ -248,7 +248,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	}
 	// After New, which has the lock's path already.
 	book := testLedger(t)
-	// A glab found on PATH later, such as a session wrapper, must not be used.
+	// A glab found on PATH later must not be used: the issuer resolved its own.
 	decoy := t.TempDir()
 	os.WriteFile(filepath.Join(decoy, "glab"), []byte("#!/bin/sh\nexit 1\n"), 0700)
 	t.Setenv("PATH", decoy+string(os.PathListSeparator)+path)
