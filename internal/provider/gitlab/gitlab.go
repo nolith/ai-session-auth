@@ -199,10 +199,6 @@ func (g *Provider) Kind() string { return "gitlab" }
 // git at the session PAT for the allowlisted namespaces. It protects the
 // user's own glab login and a stored issuer PAT.
 func (g *Provider) Setup() provider.Setup {
-	namespaces := slices.Clone(g.Config.Groups)
-	if g.Config.PersonalProjects {
-		namespaces = append(namespaces, g.Config.ExpectedUser)
-	}
 	var protect []string
 	if dir, err := glabConfigDir(os.Getenv, os.UserConfigDir); err == nil {
 		protect = append(protect, dir)
@@ -213,10 +209,12 @@ func (g *Provider) Setup() provider.Setup {
 	return provider.Setup{
 		Env: map[string]string{"GLAB_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir},
 		Git: []provider.GitHost{{
-			Host:         g.Config.Host,
-			Username:     "oauth2",
-			Namespaces:   namespaces,
-			Repositories: slices.Clone(g.Config.Projects),
+			Host:     g.Config.Host,
+			Username: "oauth2",
+			// A namespace covers what is below it; a project's own path is
+			// its repository. Which a path is, only the lookup knows.
+			Namespaces:   slices.Clone(g.Config.Namespaces),
+			Repositories: slices.Clone(g.Config.Namespaces),
 		}},
 		Protect: protect,
 	}
@@ -359,22 +357,33 @@ func (g *Provider) Settle(ctx context.Context, l *ledger.Ledger) error {
 // lookup is the issuer lookup's answer: the issuer's user and every namespace
 // the allowlist names, in configuration order.
 type lookup struct {
-	user     string
-	groups   []namespace
-	projects []namespace
+	user       string
+	namespaces []namespace
 }
 
-// namespace is one group or project resolved by path or ID. id is the GraphQL
-// global ID, which granular scopes use as it is.
+// The kinds of namespace, by the model of the global ID namespace(fullPath:)
+// answers with.
+const (
+	groupNamespace   = "Group"
+	userNamespace    = "Namespaces::UserNamespace"
+	projectNamespace = "Namespaces::ProjectNamespace"
+)
+
+// namespace is one configured path, resolved: its kind, and the global ID a
+// granular scope names it by, which for a project namespace is the project's
+// own, gid://gitlab/Project/<id>; a user namespace needs none.
 type namespace struct {
+	kind     string
 	id       string
 	fullPath string
 }
 
 // lookupDocument builds the one aliased query that replaces the REST user call
-// and the per-namespace lookups: currentUser for the identity check, and one
-// group(fullPath:) or project(fullPath:) alias per configured path. GraphQL
-// never embeds a group's projects, so the 6 s REST answer disappears with it.
+// and the per-namespace lookups: currentUser for the identity check, and for
+// each configured path both namespace(fullPath:), whose global ID's model
+// says whether the path is a group, a user's namespace or a project, and
+// project(fullPath:), for a project's own ID. GraphQL never embeds a group's
+// projects, so the 6 s REST answer disappears with it.
 //
 // The paths are written into the document as escaped string literals: an alias
 // needs one literal argument each, and the glab issuer carries only objects and
@@ -382,10 +391,8 @@ type namespace struct {
 func lookupDocument(c config.GitLabConfig) string {
 	var b strings.Builder
 	b.WriteString("query SessionLookup {\n  currentUser { username }\n")
-	for i, path := range c.Groups {
-		fmt.Fprintf(&b, "  g%d: group(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
-	}
-	for i, path := range c.Projects {
+	for i, path := range c.Namespaces {
+		fmt.Fprintf(&b, "  n%d: namespace(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
 		fmt.Fprintf(&b, "  p%d: project(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
 	}
 	b.WriteString("}\n")
@@ -410,8 +417,24 @@ func parseGlobalID(value, model string) (int64, error) {
 	return id, nil
 }
 
+// globalModel returns the model of a GraphQL global ID, such as Group for
+// gid://gitlab/Group/9970, or "" when value is not one.
+func globalModel(value string) string {
+	rest, ok := strings.CutPrefix(value, "gid://gitlab/")
+	model, id, found := strings.Cut(rest, "/")
+	if !ok || !found {
+		return ""
+	}
+	if n, err := strconv.ParseInt(id, 10, 64); err != nil || n <= 0 {
+		return ""
+	}
+	return model
+}
+
 // lookup resolves the user and every configured namespace in one request, and
-// refuses a path that does not resolve, as the REST lookups did.
+// refuses a path that does not resolve, or resolves to another path, as the
+// REST lookups did. Which kind each namespace is comes from its global ID's
+// model; whether that kind may be granted is for scopes to decide.
 func (g *Provider) lookup(ctx context.Context) (lookup, error) {
 	var answer struct {
 		Errors []any                      `json:"errors"`
@@ -430,19 +453,29 @@ func (g *Provider) lookup(ctx context.Context) (lookup, error) {
 		return lookup{}, err
 	}
 	resolved := lookup{user: user.Username}
-	for i, path := range g.Config.Groups {
-		node, err := pathNode(answer.Data, fmt.Sprintf("g%d", i), "Group", path)
+	for i, path := range g.Config.Namespaces {
+		node, err := pathNode(answer.Data, fmt.Sprintf("n%d", i), "namespace", path)
 		if err != nil {
 			return lookup{}, err
 		}
-		resolved.groups = append(resolved.groups, node)
-	}
-	for i, path := range g.Config.Projects {
-		node, err := pathNode(answer.Data, fmt.Sprintf("p%d", i), "Project", path)
-		if err != nil {
-			return lookup{}, err
+		resolved.namespaces = append(resolved.namespaces, node)
+		ns := &resolved.namespaces[i]
+		switch ns.kind {
+		case groupNamespace, userNamespace:
+		case projectNamespace:
+			// A granular scope names a project by its own ID, not by its
+			// namespace's.
+			project, err := pathNode(answer.Data, fmt.Sprintf("p%d", i), "project", path)
+			if err != nil {
+				return lookup{}, err
+			}
+			if project.kind != "Project" {
+				return lookup{}, fmt.Errorf("GitLab project %s resolves without a project ID; update the allowlist", path)
+			}
+			ns.id = project.id
+		default:
+			return lookup{}, fmt.Errorf("GitLab namespace %s is neither a group, a user nor a project; update the allowlist", path)
 		}
-		resolved.projects = append(resolved.projects, node)
 	}
 	return resolved, nil
 }
@@ -460,55 +493,66 @@ func decodeAlias(data map[string]json.RawMessage, alias, what string, out any) e
 	return nil
 }
 
-// pathNode resolves one configured group or project and refuses anything but
-// the configured path and a global ID of the expected model.
-func pathNode(data map[string]json.RawMessage, alias, model, path string) (namespace, error) {
+// pathNode resolves one alias of a configured path and refuses anything but
+// the configured path, in the same case, and a well-formed global ID, whose
+// model it returns as the kind.
+func pathNode(data map[string]json.RawMessage, alias, what, path string) (namespace, error) {
 	var node struct {
 		ID       string `json:"id"`
 		FullPath string `json:"fullPath"`
 	}
-	kind := strings.ToLower(model)
-	if err := decodeAlias(data, alias, kind+" "+path, &node); err != nil {
+	if err := decodeAlias(data, alias, what+" "+path, &node); err != nil {
 		return namespace{}, err
 	}
 	if node.FullPath != path {
-		return namespace{}, fmt.Errorf("GitLab %s %s resolves to another path; update the allowlist", kind, path)
+		return namespace{}, fmt.Errorf("GitLab %s %s resolves to another path; update the allowlist", what, path)
 	}
-	if _, err := parseGlobalID(node.ID, model); err != nil {
-		return namespace{}, fmt.Errorf("GitLab %s %s resolves without an ID; update the allowlist", kind, path)
+	model := globalModel(node.ID)
+	if model == "" {
+		return namespace{}, fmt.Errorf("GitLab %s %s resolves without an ID; update the allowlist", what, path)
 	}
-	return namespace{id: node.ID, fullPath: node.FullPath}, nil
+	return namespace{kind: model, id: node.ID, fullPath: node.FullPath}, nil
 }
 
-// scopes returns the session PAT's scopes from the resolved namespaces. Groups
-// and projects are refused unless GitLab reported the same path, so a renamed
-// or mistyped namespace stops the session before any PAT exists.
+// scopes returns the session PAT's scopes from the resolved namespaces: each
+// group and project in SELECTED_MEMBERSHIPS, by its ID, and the user's own
+// namespace as PERSONAL_PROJECTS. Another user's namespace is refused: it
+// would take PERSONAL_PROJECTS, which only ever means the token owner's.
 func (g *Provider) scopes(resolved lookup) ([]config.Scope, error) {
 	allowed := map[string]bool{}
 	var ids []string
-	for _, namespaces := range [][]namespace{resolved.groups, resolved.projects} {
-		for _, node := range namespaces {
-			allowed[node.id] = true
-			ids = append(ids, node.id)
+	personal := false
+	for _, ns := range resolved.namespaces {
+		switch ns.kind {
+		case userNamespace:
+			if ns.fullPath != g.Config.ExpectedUser || ns.fullPath != resolved.user {
+				return nil, fmt.Errorf("GitLab namespace %s belongs to another user; only expected_user's own is allowed", ns.fullPath)
+			}
+			personal = true
+		case groupNamespace, projectNamespace:
+			allowed[ns.id] = true
+			ids = append(ids, ns.id)
+		default:
+			return nil, fmt.Errorf("GitLab namespace %s is neither a group, a user nor a project", ns.fullPath)
 		}
 	}
-	scopes := namespacedScopes(g.Config, ids)
-	if err := config.CheckScopes(scopes, allowed, g.Config.PersonalProjects); err != nil {
+	scopes := namespacedScopes(g.Config.Permissions, ids, personal)
+	if err := config.CheckScopes(scopes, allowed, personal); err != nil {
 		return nil, err
 	}
 	return scopes, nil
 }
 
 // namespacedScopes grants read_user, to verify the user, and the permissions
-// on each resolved group and project and on personal projects when enabled.
-// A group covers its subgroups and their projects.
-func namespacedScopes(c config.GitLabConfig, resourceIDs []string) []config.Scope {
+// on each resolved group and project, and on the user's personal projects
+// when personal. A group covers its subgroups and their projects.
+func namespacedScopes(permissions, resourceIDs []string, personal bool) []config.Scope {
 	scopes := []config.Scope{{Access: "USER", Permissions: []string{"read_user"}}}
 	if len(resourceIDs) > 0 {
-		scopes = append(scopes, config.Scope{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: resourceIDs, Permissions: c.Permissions})
+		scopes = append(scopes, config.Scope{Access: "SELECTED_MEMBERSHIPS", ResourceIDs: resourceIDs, Permissions: permissions})
 	}
-	if c.PersonalProjects {
-		scopes = append(scopes, config.Scope{Access: "PERSONAL_PROJECTS", Permissions: c.Permissions})
+	if personal {
+		scopes = append(scopes, config.Scope{Access: "PERSONAL_PROJECTS", Permissions: permissions})
 	}
 	return scopes
 }

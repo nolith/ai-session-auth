@@ -170,8 +170,8 @@ Prefer a fine-grained issuer PAT with:
 
 - In the **User** boundary: Personal Access Token **Create, Read, Revoke**;
   User **Read** to verify your identity.
-- In the allowlisted groups and projects, and your personal projects if
-  enabled: at least every permission granted to the agent token, as listed in
+- In the allowlisted namespaces (groups, projects and your personal
+  projects): at least every permission granted to the agent token, as listed in
   `permissions` of the `gitlab` provider in `config.example.json`.
 
 The API permission names for the issuer's User boundary are:
@@ -194,25 +194,32 @@ this version does not automatically renew the issuer credential.
 List what agents may reach by path, with no numeric IDs, on the `gitlab`
 provider:
 
-- `groups`: groups such as `gitlab-org` or `gitlab-org/ai`. A group
-  covers its subgroups and all their projects.
-- `personal_projects`: `true` adds the projects in your own namespace,
-  `expected_user/...`.
-- `projects`: single projects, such as `some-group/project`.
-- `permissions`: one list, granted on all of the above.
+- `namespaces`: groups such as `gitlab-org` or `gitlab-org/ai`, which cover
+  their subgroups and all their projects; your own namespace,
+  `expected_user`, which covers your personal projects; and single projects,
+  such as `some-group/project`.
+- `permissions`: one list, granted on all of them.
 
-At session start, each group and project is looked up with `GET groups/:path`
-or `GET projects/:path` and refused unless GitLab reports the same path, in the
-same case, so a renamed or mistyped namespace fails GitLab before any PAT
-exists. The session PAT then gets `read_user` on your user (`USER`), the
-permissions on the resolved groups and projects (`SELECTED_MEMBERSHIPS`), and
-on your personal projects (`PERSONAL_PROJECTS`) if enabled. `ALL_MEMBERSHIPS`
-and `INSTANCE` are never requested, and PAT management permissions are refused.
+At session start, one GraphQL query checks your user and resolves every
+path, with `namespace(fullPath:)` and `project(fullPath:)`; the global ID's
+model says what the path is:
+
+| Model                          | Granted as                                          |
+| :----------------------------- | :-------------------------------------------------- |
+| `Group`                        | `SELECTED_MEMBERSHIPS`, the group's ID              |
+| `Namespaces::UserNamespace`    | `PERSONAL_PROJECTS`, only for `expected_user`'s own |
+| `Namespaces::ProjectNamespace` | `SELECTED_MEMBERSHIPS`, the project's ID            |
+
+A path that does not resolve, or that GitLab reports with another path or in
+another case, is refused, so a renamed or mistyped namespace fails GitLab
+before any PAT exists; so is another user's namespace. The session PAT also
+gets `read_user` on your user (`USER`). `ALL_MEMBERSHIPS` and `INSTANCE` are
+never requested, and PAT management permissions are refused.
 
 The Git credential helper offers the token only for paths inside these
-namespaces, by whole segments: `gitlab-org` covers `gitlab-org/gitlab` and
-`gitlab-org/ai/skills`, never `gitlab-org-foo/project`. Paths are
-case-sensitive, and `projects` match exactly.
+namespaces, by whole segments, or for a project's own path: `gitlab-org`
+covers `gitlab-org/gitlab` and `gitlab-org/ai/skills`, never
+`gitlab-org-foo/project`. Paths are case-sensitive.
 
 A group grant is wide: with `gitlab-org`, a session can push branches, open
 merge requests and run jobs in every project there that your role allows, not
@@ -227,7 +234,7 @@ the project's branch protections.
 ```bash
 mkdir -p ~/.config/geas
 cp config.example.json ~/.config/geas/config.json
-# Set the Client ID, usernames, GitHub owners or repositories and GitLab groups before proceeding.
+# Set the Client ID, usernames, GitHub owners or repositories and GitLab namespaces before proceeding.
 ./geas config check
 ./geas save-gitlab-issuer   # only with a "bearer" issuer
 ./geas github-login
@@ -243,7 +250,7 @@ command, names another. It is version 2, a list of providers:
   "version": 2,
   "session_hours": 24,
   "providers": [
-    { "type": "gitlab", "host": "gitlab.com", "issuer": { "type": "glab" }, "expected_user": "...", "groups": ["..."], "permissions": ["..."] },
+    { "type": "gitlab", "host": "gitlab.com", "issuer": { "type": "glab" }, "expected_user": "...", "namespaces": ["..."], "permissions": ["..."] },
     { "type": "github", "host": "github.com", "client_id": "...", "expected_user": "...", "state_file": "...", "owners": ["..."] }
   ]
 }
@@ -292,8 +299,11 @@ move as follows:
 | `gitlab.issuer: "glab"`                                                     | `"issuer": {"type": "glab"}`                                          |
 | `gitlab.issuer_token_file`                                                  | `"issuer": {"type": "bearer", "token_file": ...}`                     |
 | `gitlab.expected_user`                                                      | `expected_user` on the `gitlab` provider                              |
-| `gitlab.groups`, `personal_projects`, `projects`, `permissions`             | the same fields on the `gitlab` provider                              |
-| `gitlab.repositories`, `project_ids`, `granular_scopes`                     | gone: list the projects by path in `projects`, with `permissions`     |
+| `gitlab.groups`                                                             | `namespaces`                                                          |
+| `gitlab.personal_projects: true`                                            | your own namespace, `expected_user`, in `namespaces`                  |
+| `gitlab.projects`                                                           | `namespaces`                                                          |
+| `gitlab.permissions`                                                        | `permissions` on the `gitlab` provider                                |
+| `gitlab.repositories`, `project_ids`, `granular_scopes`                     | gone: list the projects by path in `namespaces`, with `permissions`   |
 
 The files the configuration names, GitHub's `state_file` and a stored
 issuer PAT, keep their format and can stay where they are.
@@ -317,8 +327,9 @@ To use only one provider, leave the other out of `providers`.
 A provider whose credential cannot be obtained never stops the session: a
 missing, unreadable or expired GitHub login, a failed refresh or
 `expected_user` check, or for GitLab a failed issuer (logged-out or missing
-glab, unreadable `token_file`), user check, group or project
-resolution or PAT creation. The harness has started by then; the provider's
+glab, unreadable `token_file`), user check, namespace resolution or PAT
+creation.
+ The harness has started by then; the provider's
 marker records the reason (see "Session start"), and nothing is printed.
 Fix the login (`geas github-login`, `glab auth login` or
 `geas save-gitlab-issuer`) and start a new session. Configuration errors still
@@ -626,8 +637,9 @@ nix flake check      # formatting, vet, race-enabled tests and the build
 
 Tests cover identities, UTC expiry, concurrent refresh, cancellable locking,
 secret persistence, PAT creation and revocation, the glab issuer through a
-fake `glab` (arguments, environment, locking, silent failures), group and
-project resolution, scope building, namespace, owner and repository
+fake `glab` (arguments, environment, locking, silent failures, a host per
+instance), namespace resolution by model (group, your own namespace,
+project, another user's refused), scope building, namespace, owner and repository
 allowlists, the session directory (modes, atomic writes, markers), the glab,
 gh, gitconfig, sandbox policy and nono renderers against golden files, the
 `Setup.Env` merge, each tool's configuration directory per override and per

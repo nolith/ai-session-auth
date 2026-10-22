@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,14 +54,18 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("git %+v", s.Git)
 	}
 	g := s.Git[0]
-	if g.Host != "gitlab.com" || g.Username != "oauth2" || g.FoldCase || len(g.Namespaces) != 3 || g.Namespaces[2] != "alice" || len(g.Repositories) != 1 || g.Repositories[0] != "elsewhere/project" {
+	namespaces := []string{"group", "other/sub", "alice", "elsewhere/project"}
+	if g.Host != "gitlab.com" || g.Username != "oauth2" || g.FoldCase || !slices.Equal(g.Namespaces, namespaces) || !slices.Equal(g.Repositories, namespaces) {
 		t.Fatalf("git host %+v", g)
 	}
-	// Projects alone are exact repositories.
-	p = &Provider{Config: testutil.GitLab()}
-	if g := p.Setup().Git[0]; len(g.Namespaces) != 0 || len(g.Repositories) != 1 || g.Repositories[0] != "group/project" {
-		t.Fatalf("projects alone: %+v", g)
+	// Without a lookup, a path may be a group or a project: Git gets the
+	// token below a namespace, and for a project's own repository.
+	for path, want := range map[string]bool{"group/x": true, "group/sub/x.git": true, "alice/dotfiles": true, "elsewhere/project.git": true, "elsewhere/project/x": true, "elsewhere/other": false, "other/x": false, "groupx/y": false} {
+		if g.Allows(path) != want {
+			t.Errorf("%s: %v", path, !want)
+		}
 	}
+
 }
 
 // glab's directory follows glab's own resolution: each override, then the

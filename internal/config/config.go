@@ -42,13 +42,13 @@ type Issuer struct {
 
 // GitLabConfig is one GitLab instance.
 type GitLabConfig struct {
-	Host             string   `json:"host"`
-	Issuer           Issuer   `json:"issuer"`
-	ExpectedUser     string   `json:"expected_user"`
-	Groups           []string `json:"groups,omitempty"`
-	PersonalProjects bool     `json:"personal_projects,omitempty"`
-	Projects         []string `json:"projects,omitempty"`
-	Permissions      []string `json:"permissions"`
+	Host         string `json:"host"`
+	Issuer       Issuer `json:"issuer"`
+	ExpectedUser string `json:"expected_user"`
+	// Namespaces are groups, expected_user's own namespace and projects, by
+	// path: the session resolves which each one is.
+	Namespaces  []string `json:"namespaces"`
+	Permissions []string `json:"permissions"`
 }
 
 // GitHubConfig is GitHub, through a GitHub App's user tokens.
@@ -265,9 +265,12 @@ var version1Provider = map[string]map[string]string{
 		"enabled":           "leave the provider out instead",
 		"optional":          "a provider that fails never stops the session",
 		"issuer_token_file": `write "issuer": {"type": "bearer", "token_file": ...}`,
-		"repositories":      "list groups and projects by path",
-		"project_ids":       "list groups and projects by path",
-		"granular_scopes":   "list groups and projects by path, and permissions",
+		"groups":            "list groups, your own namespace and projects in namespaces",
+		"personal_projects": "list your own namespace, expected_user, in namespaces",
+		"projects":          "list groups, your own namespace and projects in namespaces",
+		"repositories":      "list groups and projects by path in namespaces",
+		"project_ids":       "list groups and projects by path in namespaces",
+		"granular_scopes":   "list groups and projects by path in namespaces, and permissions",
 	},
 	TypeGitHub: {
 		"enabled":  "leave the provider out instead",
@@ -437,7 +440,8 @@ func validateGitLab(g GitLabConfig) error {
 }
 
 // validatePaths accepts canonical, distinct Git paths; a project needs a
-// namespace, a group may be top-level. GitHub compares them case-insensitively.
+// namespace, a GitLab namespace may be top-level. GitHub compares them
+// case-insensitively.
 func validatePaths(paths []string, project, fold bool) error {
 	seen := map[string]bool{}
 	for _, path := range paths {
@@ -446,7 +450,7 @@ func validatePaths(paths []string, project, fold bool) error {
 			if project {
 				return errors.New("repository paths must look like owner/repo or group/project")
 			}
-			return errors.New("GitLab groups must look like group or group/subgroup")
+			return errors.New("GitLab namespaces must look like group, group/subgroup, user or group/project")
 		}
 		key := path
 		if fold {
@@ -481,16 +485,10 @@ func validateOwners(owners []string) error {
 // asks for. The session and the provider both refuse a session PAT that
 // would be broader than the configuration.
 func ValidateGitLabAllowlist(c GitLabConfig) error {
-	if len(c.Groups) == 0 && !c.PersonalProjects && len(c.Projects) == 0 {
-		return errors.New("configure GitLab groups, personal_projects or projects")
+	if len(c.Namespaces) == 0 {
+		return errors.New("configure GitLab namespaces")
 	}
-	if err := validatePaths(c.Groups, false, false); err != nil {
-		return err
-	}
-	if slices.Contains(c.Groups, c.ExpectedUser) {
-		return errors.New("your own namespace is not a group: use personal_projects")
-	}
-	if err := validatePaths(c.Projects, true, false); err != nil {
+	if err := validatePaths(c.Namespaces, false, false); err != nil {
 		return err
 	}
 	return checkPermissions(c.Permissions)
@@ -498,7 +496,7 @@ func ValidateGitLabAllowlist(c GitLabConfig) error {
 
 // CheckScopes refuses what a session PAT must never get: PAT management, USER
 // beyond read_user, resources outside allowed, and ALL_MEMBERSHIPS, INSTANCE or
-// (unless personal) PERSONAL_PROJECTS.
+// (unless personal, when namespaces has the user's own) PERSONAL_PROJECTS.
 func CheckScopes(scopes []Scope, allowed map[string]bool, personal bool) error {
 	for _, scope := range scopes {
 		switch scope.Access {
@@ -522,7 +520,8 @@ func CheckScopes(scopes []Scope, allowed map[string]bool, personal bool) error {
 			}
 		case "PERSONAL_PROJECTS":
 			if !personal || len(scope.ResourceIDs) != 0 {
-				return errors.New("PERSONAL_PROJECTS needs personal_projects and no resourceIds")
+				return errors.New("PERSONAL_PROJECTS needs your own namespace and no resourceIds")
+
 			}
 		default:
 			return errors.New("agent scopes must use selected groups or projects")

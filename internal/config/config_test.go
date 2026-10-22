@@ -13,11 +13,11 @@ import (
 // The fixtures other packages share live in internal/testutil; a test of this
 // package cannot import it without a cycle, so it keeps its own.
 func gitlabConfig() GitLabConfig {
-	return GitLabConfig{Host: "gitlab.com", Issuer: Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Projects: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
+	return GitLabConfig{Host: "gitlab.com", Issuer: Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Namespaces: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
 }
 func namespacedConfig() GitLabConfig {
 	c := gitlabConfig()
-	c.Groups, c.PersonalProjects, c.Projects = []string{"group", "other/sub"}, true, []string{"elsewhere/project"}
+	c.Namespaces = []string{"group", "other/sub", "alice", "elsewhere/project"}
 	return c
 }
 func testConfig() Config {
@@ -49,7 +49,7 @@ func TestLoadVersion2(t *testing.T) {
   "version": 2,
   "session_hours": 12,
   "providers": [
-    {"type": "gitlab", "host": "gitlab.com", "issuer": {"type": "bearer", "token_file": "issuer.txt"}, "expected_user": "alice", "groups": ["group"], "permissions": ["read_project"]},
+    {"type": "gitlab", "host": "gitlab.com", "issuer": {"type": "bearer", "token_file": "issuer.txt"}, "expected_user": "alice", "namespaces": ["group"], "permissions": ["read_project"]},
     {"type": "github", "host": "github.com", "client_id": "app", "expected_user": "alice", "state_file": "~/state/github.json", "owners": ["alice"]}
   ]
 }`)
@@ -67,7 +67,7 @@ func TestLoadVersion2(t *testing.T) {
 	// session_hours defaults to 24, and what MarshalJSON writes loads back.
 	c.SessionHours = 0
 	again, err := load(t, c)
-	if err != nil || again.SessionHours != 24 || !slices.Equal(again.GitLab[0].Groups, []string{"group"}) || !slices.Equal(again.GitHub[0].Owners, []string{"alice"}) {
+	if err != nil || again.SessionHours != 24 || !slices.Equal(again.GitLab[0].Namespaces, []string{"group"}) || !slices.Equal(again.GitHub[0].Owners, []string{"alice"}) {
 		t.Fatalf("%+v %v", again, err)
 	}
 	// The shipped example must load as it is.
@@ -89,6 +89,8 @@ func TestVersion1Refused(t *testing.T) {
 		{`{"version": 2, "providers": [{"type": "gitlab", "host": "gitlab.com", "issuer": "glab"}]}`, `providers[0]: "issuer" is a version 1 field: write "issuer": {"type": "glab"}`},
 		{`{"version": 2, "providers": [{"type": "gitlab", "issuer_token_file": "x"}]}`, `providers[0]: "issuer_token_file" is a version 1 field: write "issuer": {"type": "bearer", "token_file": ...}`},
 		{`{"version": 2, "providers": [{"type": "gitlab", "project_ids": [42]}]}`, `providers[0]: "project_ids" is a version 1 field`},
+		{`{"version": 2, "providers": [{"type": "gitlab", "host": "gitlab.com", "groups": ["gitlab-org"], "namespaces": []}]}`, `providers[0]: "groups" is a version 1 field: list groups, your own namespace and projects in namespaces`},
+		{`{"version": 2, "providers": [{"type": "gitlab", "personal_projects": true}]}`, `providers[0]: "personal_projects" is a version 1 field: list your own namespace, expected_user, in namespaces`},
 		{`{"session_hours": 24}`, `the configuration has no "version": write "version": 2`},
 	} {
 		_, err := Load(write(t, tc.raw))
@@ -239,14 +241,15 @@ func TestGitLabNamespacedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*GitLabConfig){
-		"no namespace":                func(g *GitLabConfig) { g.Groups, g.PersonalProjects, g.Projects = nil, false, nil },
-		"no permissions":              func(g *GitLabConfig) { g.Permissions = nil },
-		"PAT management":              func(g *GitLabConfig) { g.Permissions = append(g.Permissions, "revoke_personal_access_token") },
-		"own namespace as a group":    func(g *GitLabConfig) { g.Groups = append(g.Groups, "alice") },
-		"group with a trailing slash": func(g *GitLabConfig) { g.Groups = []string{"group/"} },
-		"group with dot segments":     func(g *GitLabConfig) { g.Groups = []string{"group/../other"} },
-		"duplicate group":             func(g *GitLabConfig) { g.Groups = []string{"group", "group"} },
-		"project without namespace":   func(g *GitLabConfig) { g.Projects = []string{"project"} },
+		"no namespace":                    func(g *GitLabConfig) { g.Namespaces = nil },
+		"no permissions":                  func(g *GitLabConfig) { g.Permissions = nil },
+		"PAT management":                  func(g *GitLabConfig) { g.Permissions = append(g.Permissions, "revoke_personal_access_token") },
+		"namespace with a trailing slash": func(g *GitLabConfig) { g.Namespaces = []string{"group/"} },
+		"namespace with a leading slash":  func(g *GitLabConfig) { g.Namespaces = []string{"/group"} },
+		"namespace with dot segments":     func(g *GitLabConfig) { g.Namespaces = []string{"group/../other"} },
+		"namespace with .git":             func(g *GitLabConfig) { g.Namespaces = []string{"group/project.git"} },
+		"namespace with a colon":          func(g *GitLabConfig) { g.Namespaces = []string{"group:x"} },
+		"duplicate namespace":             func(g *GitLabConfig) { g.Namespaces = []string{"group", "group"} },
 	} {
 		c := testConfig()
 		c.GitLab[0] = namespacedConfig()

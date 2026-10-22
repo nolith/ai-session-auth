@@ -33,7 +33,7 @@ func Config() config.Config {
 // GitLab is gitlab.com with a stored issuer PAT, allowing the one project the
 // fake glab answers for, group/project (ID 42).
 func GitLab() config.GitLabConfig {
-	return config.GitLabConfig{Host: "gitlab.com", Issuer: config.Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Projects: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
+	return config.GitLabConfig{Host: "gitlab.com", Issuer: config.Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Namespaces: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
 }
 
 // GitHub is github.com for alice, allowing alice/repo.
@@ -41,11 +41,11 @@ func GitHub() config.GitHubConfig {
 	return config.GitHubConfig{Host: "github.com", ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}
 }
 
-// NamespacedConfig allows two groups (one a subgroup), alice's personal
-// projects and one project elsewhere.
+// NamespacedConfig allows two groups (one a subgroup), alice's own namespace
+// and one project elsewhere.
 func NamespacedConfig() config.GitLabConfig {
 	c := GitLab()
-	c.Groups, c.PersonalProjects, c.Projects = []string{"group", "other/sub"}, true, []string{"elsewhere/project"}
+	c.Namespaces = []string{"group", "other/sub", "alice", "elsewhere/project"}
 	return c
 }
 
@@ -126,9 +126,10 @@ case "$method $last" in
 		fi
 		printf '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[{"id":"gid://gitlab/PersonalAccessToken/99","name":"%s-other"},{"id":"gid://gitlab/PersonalAccessToken/42","name":"%s"}]}}}}\n' "$name" "$name"
 		;;
-	*'p0: project(fullPath: "group/project")'*)
-		echo '{"data":{"currentUser":{"username":"alice"},"p0":{"id":"gid://gitlab/Project/42","fullPath":"group/project"}}}'
+	*'n0: namespace(fullPath: "group/project")'*)
+		echo '{"data":{"currentUser":{"username":"alice"},"n0":{"id":"gid://gitlab/Namespaces::ProjectNamespace/1042","fullPath":"group/project"},"p0":{"id":"gid://gitlab/Project/42","fullPath":"group/project"}}}'
 		;;
+
 
 	*)
 		echo "unexpected query" >&2

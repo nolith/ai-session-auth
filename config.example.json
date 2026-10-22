@@ -7,9 +7,7 @@
       "host": "gitlab.com",
       "issuer": { "type": "glab" },
       "expected_user": "YOUR_GITLAB_USERNAME",
-      "groups": ["YOUR_GROUP"],
-      "personal_projects": true,
-      "projects": ["SOME_GROUP/YOUR_PROJECT"],
+      "namespaces": ["YOUR_GROUP", "YOUR_GITLAB_USERNAME", "SOME_GROUP/YOUR_PROJECT"],
       "permissions": [
         "read_project", "read_member", "read_label",
         "read_repository", "read_commit", "read_branch", "read_code", "download_code", "push_code",
