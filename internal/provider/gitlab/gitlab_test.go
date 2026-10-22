@@ -485,6 +485,44 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 	}
 }
 
+// A mint GitLab answers with errors creates nothing, so its entry is settled
+// at once; a mint whose answer never arrives stays open for the reaper.
+func TestRefusedMintSettlesItsEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mint func() (int, any)
+		open bool
+	}{
+		{"refused", func() (int, any) {
+			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": nil, "errors": []string{"granular scopes are invalid"}}}}
+		}, false},
+		{"no answer", func() (int, any) { return 502, map[string]any{"message": "bad gateway"} }, true},
+	} {
+		book := testLedger(t)
+		api := mockAPI(t, func(r *http.Request) (int, any) {
+			query, _ := graphqlPayload(t, r)
+			if strings.Contains(query, "personalAccessTokenCreate") {
+				return tc.mint()
+			}
+			_, answer := issuerAnswer(t, query, "alice", map[string]any{"group": map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "group"}}, nil)
+			return 200, answer
+		})
+		c := testutil.NamespacedConfig()
+		c.Groups, c.Projects = []string{"group"}, nil
+		g := &Provider{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
+		if _, err := g.create(context.Background(), book, time.Hour); err == nil {
+			t.Fatalf("%s: the mint succeeded", tc.name)
+		}
+		entries, err := book.Entries()
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("%s: entries %+v %v", tc.name, entries, err)
+		}
+		if open, _ := book.Unrevoked(); (len(open) == 1) != tc.open {
+			t.Errorf("%s: open entries %+v, want open=%v", tc.name, open, tc.open)
+		}
+	}
+}
+
 func must[T any](value T, err error) T {
 	if err != nil {
 		panic(err)

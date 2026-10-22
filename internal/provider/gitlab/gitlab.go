@@ -243,6 +243,14 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 	}
 	g.Steps.Step("mint")
 	if len(result.Errors) > 0 || len(result.Data.Create.Errors) > 0 || result.Data.Create.Token == "" {
+		// GitLab answered and refused: no PAT exists under this name, so the
+		// entry is settled and no revoker chases it. A transport error above
+		// leaves the entry open: the PAT may exist, and only a search by
+		// name can tell.
+		entry.Revoked = true
+		if err := l.Record(entry); err != nil {
+			return "", err
+		}
 		return "", errors.New("GitLab PAT creation failed: verify granular scopes and issuer permissions")
 	}
 	g.mu.Lock()
