@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -33,7 +35,7 @@ type OAuthResponse struct {
 }
 type GitHub struct {
 	Config config.GitHubConfig
-	API    *API
+	API    *api.API
 	Now    func() time.Time
 }
 
@@ -44,7 +46,7 @@ func (g *GitHub) save(response OAuthResponse) (GitHubState, error) {
 	}
 	now := float64(g.Now().Unix())
 	state = GitHubState{g.Config.ClientID, response.AccessToken, response.RefreshToken, now + float64(response.ExpiresIn), now + float64(response.RefreshExpiresIn)}
-	if err := writeJSON(g.Config.StateFile, state); err != nil {
+	if err := secretfile.WriteJSON(g.Config.StateFile, state); err != nil {
 		return state, errors.New("cannot persist rotated GitHub credentials; reauthorization may be necessary")
 	}
 	return state, nil
@@ -53,7 +55,7 @@ func (g *GitHub) verify(ctx context.Context, token string) error {
 	var user struct {
 		Login string `json:"login"`
 	}
-	if err := g.API.request(ctx, http.MethodGet, g.API.GitHubAPI+"/user", token, nil, false, &user); err != nil {
+	if err := g.API.Request(ctx, http.MethodGet, g.API.GitHubAPI+"/user", token, nil, false, &user); err != nil {
 		return err
 	}
 	if !strings.EqualFold(user.Login, g.Config.ExpectedUser) || user.Login == "" {
@@ -63,8 +65,8 @@ func (g *GitHub) verify(ctx context.Context, token string) error {
 }
 func (g *GitHub) token(ctx context.Context) (string, error) {
 	var token string
-	err := withFileLock(ctx, g.Config.StateFile, func() error {
-		raw, err := privateRead(g.Config.StateFile)
+	err := secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
+		raw, err := secretfile.Read(g.Config.StateFile)
 		if errors.Is(err, os.ErrNotExist) {
 			return errors.New("run github-login before starting a session")
 		}
@@ -88,7 +90,7 @@ func (g *GitHub) token(ctx context.Context) (string, error) {
 			}
 			var response OAuthResponse
 			payload := url.Values{"client_id": {g.Config.ClientID}, "grant_type": {"refresh_token"}, "refresh_token": {state.RefreshToken}}
-			if err = g.API.request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/oauth/access_token", "", payload, true, &response); err != nil {
+			if err = g.API.Request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/oauth/access_token", "", payload, true, &response); err != nil {
 				return err
 			}
 			if response.Error != "" {
@@ -105,7 +107,7 @@ func (g *GitHub) token(ctx context.Context) (string, error) {
 	return token, err
 }
 func (g *GitHub) login(ctx context.Context, output io.Writer) error {
-	return withFileLock(ctx, g.Config.StateFile, func() error {
+	return secretfile.WithFileLock(ctx, g.Config.StateFile, func() error {
 		var device struct {
 			DeviceCode      string `json:"device_code"`
 			UserCode        string `json:"user_code"`
@@ -113,7 +115,7 @@ func (g *GitHub) login(ctx context.Context, output io.Writer) error {
 			ExpiresIn       int64  `json:"expires_in"`
 			Interval        int64  `json:"interval"`
 		}
-		if err := g.API.request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/device/code", "", url.Values{"client_id": {g.Config.ClientID}}, true, &device); err != nil {
+		if err := g.API.Request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/device/code", "", url.Values{"client_id": {g.Config.ClientID}}, true, &device); err != nil {
 			return err
 		}
 		if device.DeviceCode == "" || device.UserCode == "" || device.Interval <= 0 || device.ExpiresIn <= 0 {
@@ -128,7 +130,7 @@ func (g *GitHub) login(ctx context.Context, output io.Writer) error {
 			}
 			var response OAuthResponse
 			values := url.Values{"client_id": {g.Config.ClientID}, "device_code": {device.DeviceCode}, "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}}
-			if err := g.API.request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/oauth/access_token", "", values, true, &response); err != nil {
+			if err := g.API.Request(ctx, http.MethodPost, g.API.GitHubLogin+"/login/oauth/access_token", "", values, true, &response); err != nil {
 				return err
 			}
 			switch response.Error {

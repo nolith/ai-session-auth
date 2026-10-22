@@ -1,4 +1,7 @@
-package main
+// Package secretfile reads and writes geas's private files: owner-only,
+// created atomically, and locked while a tool that rotates a credential holds
+// them. It also names the state directory they live in.
+package secretfile
 
 import (
 	"context"
@@ -13,7 +16,23 @@ import (
 	"github.com/nolith/geas/internal/timing"
 )
 
-func privateRead(path string) ([]byte, error) {
+// StateDirectory is $XDG_STATE_HOME/geas, where geas keeps the files only its
+// own user may read: the GitHub login, the glab lock and the reaper's log.
+func StateDirectory() (string, error) {
+	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
+		return filepath.Join(state, "geas"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "geas"), nil
+}
+
+// Read returns a secret file's contents, once it is owned by the caller, a
+// regular file and chmod 600: a symlink, another user's file or a
+// world-readable one is refused.
+func Read(path string) ([]byte, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -38,7 +57,10 @@ func privateRead(path string) ([]byte, error) {
 	}
 	return raw, nil
 }
-func atomicWrite(path string, raw []byte) error {
+
+// Write replaces a file atomically: a reader sees the old contents or the new
+// ones, never half of a rotated credential.
+func Write(path string, raw []byte) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
@@ -71,14 +93,20 @@ func atomicWrite(path string, raw []byte) error {
 	defer parent.Close()
 	return parent.Sync()
 }
-func writeJSON(path string, value any) error {
+
+// WriteJSON writes value to path as Write does.
+func WriteJSON(path string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return atomicWrite(path, raw)
+	return Write(path, raw)
 }
-func withFileLock(ctx context.Context, path string, operation func() error) error {
+
+// WithFileLock runs operation while holding path's lock, which is a file next
+// to it: a credential that rotates on every write, such as glab's OAuth
+// refresh token, cannot be rotated twice at once. The wait ends with ctx.
+func WithFileLock(ctx context.Context, path string, operation func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}

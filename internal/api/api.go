@@ -1,4 +1,7 @@
-package main
+// Package api is the HTTPS client geas uses for every provider request:
+// bearer tokens, JSON or form payloads, and errors that never quote a
+// response, which could carry a credential.
+package api
 
 import (
 	"bytes"
@@ -20,13 +23,18 @@ type API struct {
 	GitLabURL   string
 }
 
-func newAPI() *API {
+// New returns the client the session's providers share.
+func New() *API {
 	return &API{
 		Client:    &http.Client{Timeout: 30 * time.Second},
 		GitHubAPI: "https://api.github.com", GitHubLogin: "https://github.com", GitLabURL: "https://gitlab.com",
 	}
 }
-func (a *API) request(ctx context.Context, method, address, token string, payload any, form bool, result any) error {
+
+// Request sends one request and decodes its answer into result, which may be
+// nil. Redirects are not followed, so a credential is never sent to another
+// host.
+func (a *API) Request(ctx context.Context, method, address, token string, payload any, form bool, result any) error {
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil {
 		return errors.New("API requests require HTTPS without URL credentials")

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -121,7 +122,7 @@ func skip(output io.Writer, provider, reason, fix string) {
 	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
 }
 
-func runSession(ctx context.Context, settings config.Config, args []string, api *API, output io.Writer, timer *timing.Timer) (int, error) {
+func runSession(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
 	}

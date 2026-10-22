@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -35,17 +37,17 @@ type issuer interface {
 
 // bearerIssuer sends the requests itself, with the PAT from issuer_token_file.
 type bearerIssuer struct {
-	api   *API
-	token string
+	client *api.API
+	token  string
 }
 
 // The issuer's REST calls are all GET or DELETE, so they carry no body.
 func (b bearerIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
-	return b.api.request(ctx, method, b.api.GitLabURL+"/api/v4/"+endpoint, b.token, nil, false, out)
+	return b.client.Request(ctx, method, b.client.GitLabURL+"/api/v4/"+endpoint, b.token, nil, false, out)
 }
 func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
 	payload := map[string]any{"query": query, "variables": variables}
-	return b.api.request(ctx, http.MethodPost, b.api.GitLabURL+"/api/graphql", b.token, payload, false, out)
+	return b.client.Request(ctx, http.MethodPost, b.client.GitLabURL+"/api/graphql", b.token, payload, false, out)
 }
 
 // glabIssuer delegates to the user's own glab login, which renews its OAuth
@@ -69,21 +71,11 @@ func newGlabIssuer() (glabIssuer, error) {
 	if executable, err = filepath.Abs(executable); err != nil {
 		return glabIssuer{}, err
 	}
-	state, err := stateDirectory()
+	state, err := secretfile.StateDirectory()
 	if err != nil {
 		return glabIssuer{}, err
 	}
 	return glabIssuer{executable: executable, lockPath: filepath.Join(state, "glab")}, nil
-}
-func stateDirectory() (string, error) {
-	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
-		return filepath.Join(state, "geas"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "state", "geas"), nil
 }
 func (g glabIssuer) rest(ctx context.Context, method, endpoint string, out any) error {
 	return g.run(ctx, out, "--method", method, endpoint)
@@ -110,7 +102,7 @@ func (g glabIssuer) graphql(ctx context.Context, query string, variables map[str
 func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	// Pinned: otherwise glab picks the host from the cwd's remote.
 	args = append([]string{"api", "--hostname", "gitlab.com"}, args...)
-	return withFileLock(ctx, g.lockPath, func() error {
+	return secretfile.WithFileLock(ctx, g.lockPath, func() error {
 		// A locked keychain must fail the request, not hang the session.
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
@@ -154,7 +146,7 @@ type GitLab struct {
 	Steps *timing.Timer
 }
 
-func newGitLab(host config.GitLabConfig, api *API, steps *timing.Timer) (*GitLab, error) {
+func newGitLab(host config.GitLabConfig, a *api.API, steps *timing.Timer) (*GitLab, error) {
 	if host.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
@@ -162,7 +154,7 @@ func newGitLab(host config.GitLabConfig, api *API, steps *timing.Timer) (*GitLab
 		}
 		return &GitLab{Config: host, Issuer: glab, Now: time.Now, Steps: steps}, nil
 	}
-	raw, err := privateRead(host.IssuerTokenFile)
+	raw, err := secretfile.Read(host.IssuerTokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +162,7 @@ func newGitLab(host config.GitLabConfig, api *API, steps *timing.Timer) (*GitLab
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &GitLab{Config: host, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now, Steps: steps}, nil
+	return &GitLab{Config: host, Issuer: bearerIssuer{client: a, token: token}, Now: time.Now, Steps: steps}, nil
 }
 func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
 	if err := config.ValidateGitLabAllowlist(g.Config); err != nil {

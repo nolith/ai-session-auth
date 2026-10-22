@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,14 +16,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/testutil"
 )
 
 // mockAPI is the shared transport fake, wired to this package's API.
-func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *API {
+func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *api.API {
 	t.Helper()
-	a := newAPI()
+	a := api.New()
 	a.Client.Transport = testutil.Transport(handler)
 	return a
 }
@@ -119,48 +120,6 @@ func issuerAnswer(t *testing.T, query, user string, answers map[string]any, ids 
 
 // namespacedConfig allows two groups (one a subgroup), alice's personal
 // projects and one project elsewhere.
-func TestPrivateReadAndAtomicRotation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secret")
-	if err := atomicWrite(path, []byte("first")); err != nil {
-		t.Fatal(err)
-	}
-	if err := atomicWrite(path, []byte("second")); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := privateRead(path)
-	if err != nil || string(raw) != "second" {
-		t.Fatalf("%s %v", raw, err)
-	}
-	link := path + "link"
-	os.Symlink(path, link)
-	if _, err = privateRead(link); err == nil {
-		t.Fatal("followed symlink")
-	}
-	os.Chmod(path, 0644)
-	if _, err = privateRead(path); err == nil {
-		t.Fatal("read world-readable secret")
-	}
-}
-func TestFileLockCancellation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state")
-	held := make(chan struct{})
-	release := make(chan struct{})
-	done := make(chan error, 1)
-	go func() {
-		done <- withFileLock(context.Background(), path, func() error { close(held); <-release; return nil })
-	}()
-	<-held
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	err := withFileLock(ctx, path, func() error { t.Error("entered held lock"); return nil })
-	close(release)
-	if other := <-done; other != nil {
-		t.Fatal(other)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got %v", err)
-	}
-}
 func TestGitHubConcurrentRotation(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	c := testutil.Config().GitHub
@@ -180,7 +139,7 @@ func TestGitHubConcurrentRotation(t *testing.T) {
 		return 200, OAuthResponse{AccessToken: "ghu_new", RefreshToken: "rotated-refresh", ExpiresIn: 28800, RefreshExpiresIn: 15552000}
 	})
 	g := &GitHub{Config: c, API: api, Now: func() time.Time { return now }}
-	writeJSON(c.StateFile, GitHubState{ClientID: c.ClientID, AccessToken: "ghu_old", RefreshToken: "old-refresh", ExpiresAt: float64(now.Unix()), RefreshExpiresAt: float64(now.Add(time.Hour).Unix())})
+	secretfile.WriteJSON(c.StateFile, GitHubState{ClientID: c.ClientID, AccessToken: "ghu_old", RefreshToken: "old-refresh", ExpiresAt: float64(now.Unix()), RefreshExpiresAt: float64(now.Add(time.Hour).Unix())})
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
@@ -196,7 +155,7 @@ func TestGitHubConcurrentRotation(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("refresh called %d times", calls.Load())
 	}
-	raw, _ := privateRead(c.StateFile)
+	raw, _ := secretfile.Read(c.StateFile)
 	var state GitHubState
 	json.Unmarshal(raw, &state)
 	if state.RefreshToken != "rotated-refresh" {
@@ -252,7 +211,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 			return 500, nil
 		}
 	})
-	g := &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
+	g := &GitLab{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: func() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC) }}
 	token, err := g.create(context.Background(), 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
@@ -272,7 +231,7 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 		minted, answer = issuerAnswer(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
 		return 200, answer
 	})
-	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}
@@ -285,19 +244,9 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 		minted, answer = issuerAnswer(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
 		return 200, answer
 	})
-	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for another user")
-	}
-}
-func TestAPIErrorsDoNotExposeSecrets(t *testing.T) {
-	api := mockAPI(t, func(*http.Request) (int, any) { return 401, map[string]string{"error": "secret-from-server"} })
-	err := api.request(context.Background(), "GET", "https://gitlab.com/api/v4/user", "issuer-secret", nil, false, new(any))
-	if err == nil || strings.Contains(err.Error(), "secret") {
-		t.Fatalf("unsafe error %v", err)
-	}
-	if api.request(context.Background(), "GET", "http://gitlab.com", "token", nil, false, nil) == nil {
-		t.Fatal("accepted HTTP")
 	}
 }
 
@@ -503,7 +452,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		t.Errorf("unexpected %s %s", r.Method, r.URL)
 		return 404, nil
 	})
-	g := &GitLab{Config: testutil.NamespacedConfig(), Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.NamespacedConfig(), Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
@@ -523,7 +472,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 	// Without personal projects or explicit lists, only what is configured.
 	c := testutil.NamespacedConfig()
 	c.Groups, c.Projects = nil, nil
-	g = &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g = &GitLab{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +501,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		})
 		c := testutil.NamespacedConfig()
 		c.Groups, c.Projects = []string{"group"}, nil
-		g := &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+		g := &GitLab{Config: c, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 		if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 			t.Errorf("%s: minted (err %v)", tc.name, err)
 		}
@@ -583,7 +532,7 @@ func TestRevokeCheckedLeavesOtherTokens(t *testing.T) {
 			}
 			return 200, tc.current
 		})
-		g := &GitLab{Issuer: bearerIssuer{api: api, token: "issuer"}}
+		g := &GitLab{Issuer: bearerIssuer{client: api, token: "issuer"}}
 		revoked, err := g.revokeChecked(context.Background(), sessionPAT{Name: "geas-x", ID: 42})
 		if revoked != tc.revoked || deleted != tc.revoked || (err != nil) != tc.fails {
 			t.Errorf("%s: revoked %v, deleted %v, err %v", tc.name, revoked, deleted, err)

@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -27,7 +29,7 @@ import (
 const reaperDone = "revoked\n"
 
 func reaperLogPath() string {
-	state, err := stateDirectory()
+	state, err := secretfile.StateDirectory()
 	if err != nil {
 		return "reaper.log"
 	}
@@ -112,7 +114,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 		logf("cannot load the configuration: %v", err)
 		return err
 	}
-	gitlab, err := newGitLab(settings.GitLab, newAPI(), nil)
+	gitlab, err := newGitLab(settings.GitLab, api.New(), nil)
 	if err != nil {
 		logf("cannot prepare the issuer: %v", err)
 		return err

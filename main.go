@@ -11,7 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -25,7 +27,7 @@ Commands:
 
 Requires gh, glab and Git in PATH for enabled providers. Linux/macOS only.`)
 }
-func execute(ctx context.Context, args []string, api *API) (int, error) {
+func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	if len(args) > 0 && args[0] == "_proxy" {
 		if len(args) < 3 {
 			return 1, errors.New("invalid proxy invocation")
@@ -85,7 +87,7 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if err = atomicWrite(settings.GitLab.IssuerTokenFile, []byte(token+"\n")); err != nil {
+		if err = secretfile.Write(settings.GitLab.IssuerTokenFile, []byte(token+"\n")); err != nil {
 			return 1, errors.New("cannot save GitLab issuer")
 		}
 		fmt.Fprintln(os.Stdout, "Issuer saved with mode 600.")
@@ -113,7 +115,7 @@ func sessionContext() (context.Context, context.CancelFunc) {
 func main() {
 	ctx, cancel := sessionContext()
 	defer cancel()
-	code, err := execute(ctx, os.Args[1:], newAPI())
+	code, err := execute(ctx, os.Args[1:], api.New())
 	if err != nil {
 		// API errors are sanitized at their source; avoid printing paths/config secrets.
 		var path *os.PathError
