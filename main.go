@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/timing"
 )
 
 func usage(output io.Writer) {
@@ -56,9 +57,9 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		usage(os.Stderr)
 		return 2, errors.New("specify a command")
 	}
-	timer := newStepTimer(os.Getenv("GEAS_DEBUG"), os.Stderr)
+	timer := timing.New(os.Getenv("GEAS_DEBUG"), os.Stderr)
 	settings, err := config.Load(*path)
-	timer.step("config load")
+	timer.Step("config load")
 	if err != nil {
 		return 1, err
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/timing"
 )
 
 type GitHubState struct {
@@ -103,16 +104,6 @@ func (g *GitHub) token(ctx context.Context) (string, error) {
 	})
 	return token, err
 }
-func sleepContext(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
 func (g *GitHub) login(ctx context.Context, output io.Writer) error {
 	return withFileLock(ctx, g.Config.StateFile, func() error {
 		var device struct {
@@ -132,7 +123,7 @@ func (g *GitHub) login(ctx context.Context, output io.Writer) error {
 		expires := time.Now().Add(time.Duration(device.ExpiresIn) * time.Second)
 		interval := time.Duration(device.Interval) * time.Second
 		for time.Now().Before(expires) {
-			if err := sleepContext(ctx, interval); err != nil {
+			if err := timing.SleepContext(ctx, interval); err != nil {
 				return err
 			}
 			var response OAuthResponse

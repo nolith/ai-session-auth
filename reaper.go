@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/timing"
 )
 
 // The reaper revokes the session PAT when the launcher no longer can. A closing
@@ -121,7 +122,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 		return nil
 	}
 	for _, pause := range []time.Duration{0, 10 * time.Second, time.Minute} {
-		if err = sleepContext(ctx, pause); err != nil {
+		if err = timing.SleepContext(ctx, pause); err != nil {
 			break
 		}
 		attempt, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

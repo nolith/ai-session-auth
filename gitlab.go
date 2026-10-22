@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/timing"
 )
 
 const createPAT = `mutation AgentToken($input: PersonalAccessTokenCreateInput!) {
@@ -150,10 +151,10 @@ type GitLab struct {
 	Created []sessionPAT
 	Now     func() time.Time
 	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
-	Steps *stepTimer
+	Steps *timing.Timer
 }
 
-func newGitLab(host config.GitLabConfig, api *API, steps *stepTimer) (*GitLab, error) {
+func newGitLab(host config.GitLabConfig, api *API, steps *timing.Timer) (*GitLab, error) {
 	if host.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
@@ -176,7 +177,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 		return "", err
 	}
 	resolved, err := g.lookup(ctx)
-	g.Steps.step("GitLab issuer lookup")
+	g.Steps.Step("GitLab issuer lookup")
 	if err != nil {
 		return "", err
 	}
@@ -207,7 +208,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	if err := g.Issuer.graphql(ctx, createPAT, variables, &result); err != nil {
 		return "", err
 	}
-	g.Steps.step("mint")
+	g.Steps.Step("mint")
 	if len(result.Errors) > 0 || len(result.Data.Create.Errors) > 0 || result.Data.Create.Token == "" {
 		return "", errors.New("GitLab PAT creation failed: verify granular scopes and issuer permissions")
 	}
@@ -215,7 +216,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	// the exit, which may have little time, and gives the reaper its target.
 	g.Created = append(g.Created, sessionPAT{Name: name})
 	id, err := g.find(ctx, name)
-	g.Steps.step("id lookup")
+	g.Steps.Step("id lookup")
 	if err != nil {
 		return "", err
 	}

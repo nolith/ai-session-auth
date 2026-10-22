@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/nolith/geas/internal/timing"
 )
 
 func privateRead(path string) ([]byte, error) {
@@ -105,7 +107,7 @@ func withFileLock(ctx context.Context, path string, operation func() error) erro
 		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
 			return err
 		}
-		if err = sleepContext(ctx, 20*time.Millisecond); err != nil {
+		if err = timing.SleepContext(ctx, 20*time.Millisecond); err != nil {
 			return err
 		}
 	}

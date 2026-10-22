@@ -443,28 +443,6 @@ func deletes(t *testing.T, s *testSession) (count int, checked bool) {
 	return count, checked
 }
 
-// The timing log measures the steps before the harness, then goes quiet: a
-// line once the harness owns the terminal would corrupt an agent's TUI.
-func TestStepTimerSilencesAfterTheHarness(t *testing.T) {
-	var output bytes.Buffer
-	if newStepTimer("", &output) != nil || newStepTimer("http", &output) != nil {
-		t.Fatal("timing enabled without GEAS_DEBUG=timing")
-	}
-	timer := newStepTimer("http,timing", &output)
-	timer.step("config load")
-	timer.stop()
-	before := output.String()
-	timer.step("mint")
-	if output.String() != before {
-		t.Fatalf("printed after the harness: %q", output.String())
-	}
-	for _, want := range []string{"config load", "harness start"} {
-		if !strings.Contains(before, want) {
-			t.Errorf("timing log lacks %q: %q", want, before)
-		}
-	}
-}
-
 // A closed terminal or pane takes the launcher's output with it, then sends
 // SIGHUP: the harness must still be stopped and the session PAT revoked.
 func TestHangupStopsHarnessAndRevokes(t *testing.T) {
