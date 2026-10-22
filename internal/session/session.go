@@ -259,18 +259,16 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if gh != nil {
 		providers = append(providers, gh)
 	}
-	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
-	directory, err := os.MkdirTemp("/tmp", "geas-")
-	if err != nil {
-		return 1, err
-	}
-	defer os.RemoveAll(directory)
-	address := filepath.Join(directory, "broker.sock")
-	environment, err := sessionEnvironment(settings, directory, address, binary, os.Environ(), executableLookup)
-	if err != nil {
-		return 1, err
-	}
 	id, err := sessiondir.NewID(time.Now())
+	if err != nil {
+		return 1, err
+	}
+	// The configuration's errors first: nothing exists yet to clean up.
+	path, err := sessiondir.Path(id)
+	if err != nil {
+		return 1, err
+	}
+	exported, err := providerEnv(providers, path)
 	if err != nil {
 		return 1, err
 	}
@@ -283,6 +281,20 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		dir.Remove()
 		return 1, err
 	}
+	// /tmp keeps UNIX socket names short even on macOS with a long TMPDIR.
+	directory, err := os.MkdirTemp("/tmp", "geas-")
+	if err != nil {
+		dir.Remove()
+		return 1, err
+	}
+	defer os.RemoveAll(directory)
+	address := filepath.Join(directory, "broker.sock")
+	environment, err := sessionEnvironment(settings, directory, address, binary, os.Environ(), executableLookup, dir, exported)
+	if err != nil {
+		dir.Remove()
+		return 1, err
+	}
+	store := newCredentials(dir)
 	// The reaper's pipe: closed without "revoked", it revokes the ledger
 	// itself and removes the session's directory.
 	var reaper *os.File
@@ -302,6 +314,8 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 				return 1, err
 			}
 			skip(output, "GitHub", githubSkipped, "geas github-login")
+		} else if err = store.put(gh, githubCredential); err != nil {
+			return 1, err
 		}
 		mark(dir, gh.ID(), githubSkipped)
 	}
@@ -336,6 +350,8 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		}
 		if err != nil {
 			skip(output, "GitLab", gitlabSkipped, gitlabFix)
+		} else if err = store.put(gl, credential); err != nil {
+			return 1, err
 		}
 	}
 	if gl != nil {

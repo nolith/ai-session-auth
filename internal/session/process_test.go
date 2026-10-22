@@ -18,6 +18,9 @@ import (
 
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/provider"
+	"github.com/nolith/geas/internal/provider/github"
+	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -104,11 +107,15 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	dir := t.TempDir()
 	binary := "/tmp/test 'auth'"
 	base := append(os.Environ(), "GH_TOKEN=old-secret", "GITLAB_TOKEN=old-secret", "SSH_AUTH_SOCK=old-socket", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=Alice")
-	values, err := sessionEnvironment(testutil.Config(), dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil })
+	session := testutil.SessionDir(t)
+	values, err := sessionEnvironment(testutil.Config(), dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil }, session, map[string]string{"GLAB_CONFIG_DIR": session.Path() + "/glab"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := procenv.Map(values)
+	if env["GEAS_SESSION_DIR"] != session.Path() || env["GLAB_CONFIG_DIR"] != session.Path()+"/glab" || env["GIT_TERMINAL_PROMPT"] != "0" {
+		t.Fatalf("session variables: %v", env)
+	}
 	for _, key := range []string{"GH_TOKEN", "GITLAB_TOKEN", "SSH_AUTH_SOCK"} {
 		if _, ok := env[key]; ok {
 			t.Errorf("inherited %s", key)
@@ -344,7 +351,7 @@ func shimSession(t *testing.T, shim string) (string, string, error) {
 		t.Fatal(err)
 	}
 	base := append(os.Environ(), "PATH="+shims+string(os.PathListSeparator)+real+string(os.PathListSeparator)+os.Getenv("PATH"))
-	values, err := sessionEnvironment(testutil.Config(), dir, address, binary, base, func(cli string) (string, error) { return filepath.Join(shims, cli), nil })
+	values, err := sessionEnvironment(testutil.Config(), dir, address, binary, base, func(cli string) (string, error) { return filepath.Join(shims, cli), nil }, testutil.SessionDir(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,4 +434,25 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// The providers' variables reach the harness with the session's directory
+// expanded; a conflict, or a session variable, stops the session first.
+func TestProviderEnv(t *testing.T) {
+	c := testutil.Config()
+	providers := []provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)}
+	env, err := providerEnv(providers, "/state/geas/sessions/x")
+	if err != nil || len(env) != 3 || env["GLAB_CONFIG_DIR"] != "/state/geas/sessions/x/glab" || env["GH_CONFIG_DIR"] != "/state/geas/sessions/x/gh" || env["GH_PROMPT_DISABLED"] != "1" {
+		t.Fatalf("%v %v", env, err)
+	}
+	for _, name := range []string{"GEAS_SESSION_DIR", "GEAS_SANDBOX_PROFILE", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG"} {
+		if !sessionVariable(name) {
+			t.Errorf("%s is not the session's", name)
+		}
+	}
+	for _, name := range []string{"GLAB_CONFIG_DIR", "GIT_DIR", "PATH"} {
+		if sessionVariable(name) {
+			t.Errorf("%s is the session's", name)
+		}
+	}
 }

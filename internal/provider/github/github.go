@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,9 +75,28 @@ func (g *Provider) Verify(ctx context.Context, token string) error {
 
 var _ provider.Provider = (*Provider)(nil)
 
-// ID names the host; only github.com is configurable.
-func (g *Provider) ID() string   { return "github:github.com" }
+// host is the only GitHub host this provider serves.
+const host = "github.com"
+
+// ID names the host.
+func (g *Provider) ID() string   { return "github:" + host }
 func (g *Provider) Kind() string { return "github" }
+
+// Setup points gh at the session's hosts.yml, which Renderer writes, never
+// prompting, and git at the App token for the allowlisted owners and
+// repositories, in any letter case, as GitHub compares names.
+func (g *Provider) Setup() provider.Setup {
+	return provider.Setup{
+		Env: map[string]string{"GH_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir, "GH_PROMPT_DISABLED": "1"},
+		Git: []provider.GitHost{{
+			Host:         host,
+			Username:     "x-access-token",
+			Namespaces:   slices.Clone(g.Config.Owners),
+			Repositories: slices.Clone(g.Config.Repositories),
+			FoldCase:     true,
+		}},
+	}
+}
 
 // Acquire returns the App user token once GitHub confirms it is
 // expected_user's.
@@ -89,7 +109,7 @@ func (g *Provider) Acquire(ctx context.Context, _ *ledger.Ledger) (provider.Cred
 	if err = g.Verify(ctx, state.AccessToken); err != nil {
 		return provider.Credential{}, err
 	}
-	return credential(state), nil
+	return g.credential(state), nil
 }
 
 // Refresh reads the state file again, and rotates the token there once it is
@@ -99,15 +119,17 @@ func (g *Provider) Refresh(ctx context.Context, _ provider.Credential) (provider
 	if err != nil {
 		return provider.Credential{}, err
 	}
-	return credential(state), nil
+	return g.credential(state), nil
 }
 
 // Revoke does nothing: an App user token expires on its own, and revoking it
 // would sign out every other session sharing the login.
 func (g *Provider) Revoke(ctx context.Context, _ ledger.Entry) error { return nil }
 
-func credential(state GitHubState) provider.Credential {
-	return provider.Credential{Secret: state.AccessToken, Expires: time.Unix(int64(state.ExpiresAt), 0)}
+// credential is the App user token, which acts as expected_user: Acquire
+// verifies it.
+func (g *Provider) credential(state GitHubState) provider.Credential {
+	return provider.Credential{Secret: state.AccessToken, User: g.Config.ExpectedUser, Expires: time.Unix(int64(state.ExpiresAt), 0)}
 }
 
 // current reads the state file under its lock, and rotates the token there

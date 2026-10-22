@@ -105,7 +105,7 @@ func (g glabIssuer) graphql(ctx context.Context, query string, variables map[str
 }
 func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	// Pinned: otherwise glab picks the host from the cwd's remote.
-	args = append([]string{"api", "--hostname", "gitlab.com"}, args...)
+	args = append([]string{"api", "--hostname", host}, args...)
 	return secretfile.WithFileLock(ctx, g.lockPath, func() error {
 		// A locked keychain must fail the request, not hang the session.
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -175,9 +175,31 @@ func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *ti
 
 var _ provider.Provider = (*Provider)(nil)
 
-// ID names the instance; only gitlab.com is configurable so far.
-func (g *Provider) ID() string   { return "gitlab:gitlab.com" }
+// host is the instance; only gitlab.com is configurable so far.
+const host = "gitlab.com"
+
+// ID names the instance.
+func (g *Provider) ID() string   { return "gitlab:" + host }
 func (g *Provider) Kind() string { return "gitlab" }
+
+// Setup points glab at the session's config.yml, which Renderer writes, and
+// git at the session PAT for the allowlisted namespaces.
+func (g *Provider) Setup() provider.Setup {
+	namespaces := slices.Clone(g.Config.Groups)
+	if g.Config.PersonalProjects {
+		namespaces = append(namespaces, g.Config.ExpectedUser)
+	}
+	return provider.Setup{
+		Env: map[string]string{"GLAB_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir},
+		Git: []provider.GitHost{{
+			Host:     host,
+			Username: "oauth2",
+			// The earlier format's repositories, or the projects.
+			Namespaces:   namespaces,
+			Repositories: append(slices.Clone(g.Config.Projects), g.Config.Repositories...),
+		}},
+	}
+}
 
 // Acquire mints the session PAT and resolves its ID, so that the exit needs a
 // single DELETE. The PAT's name is in the ledger before the mint, and its ID
@@ -191,7 +213,7 @@ func (g *Provider) Acquire(ctx context.Context, l *ledger.Ledger) (provider.Cred
 	if err != nil {
 		return provider.Credential{}, err
 	}
-	return provider.Credential{Secret: token, Expires: expires}, nil
+	return provider.Credential{Secret: token, User: g.Config.ExpectedUser, Expires: expires}, nil
 }
 
 // Refresh returns c: a session PAT outlives the session.

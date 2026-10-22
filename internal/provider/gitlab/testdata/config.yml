@@ -1,0 +1,19 @@
+# Written by geas for this session; replaced whole when a credential changes.
+git_protocol: https
+check_update: false
+show_whats_new: false
+no_prompt: true
+host: gitlab.com
+hosts:
+    gitlab.com:
+        api_host: gitlab.com
+        api_protocol: https
+        git_protocol: https
+        token: "glpat-\"quoted\"\nsecret"
+        user: "alice"
+    ops.gitlab.net:
+        api_host: ops.gitlab.net
+        api_protocol: https
+        git_protocol: https
+        token: "glpat-ops-secret"
+        user: "alice"

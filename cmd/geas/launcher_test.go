@@ -223,6 +223,31 @@ func TestCleanExitRevokesOnce(t *testing.T) {
 	}
 }
 
+// The harness finds its credentials in its session directory, in the files
+// glab and the credential helper read, and the directory is gone after the
+// session.
+func TestHarnessSeesTheSessionDirectory(t *testing.T) {
+	s := startSession(t, `printf 'dir=%s\n' "$GEAS_SESSION_DIR"
+printf 'glab=%s\n' "$GLAB_CONFIG_DIR"
+printf 'secret=%s\n' "$(cat "$GEAS_SESSION_DIR/secrets/gitlab:gitlab.com")"
+printf 'marker=%s\n' "$(cat "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com")"
+grep -c 'token: "session-secret"' "$GLAB_CONFIG_DIR/config.yml"
+ls -ld "$GEAS_SESSION_DIR" "$GLAB_CONFIG_DIR/config.yml" | cut -c1-10`)
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	output := string(raw)
+	left := sessions(t, s)
+	if len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
+	}
+	dir := filepath.Join(s.state, "geas", "sessions")
+	for _, want := range []string{"\ndir=" + dir + "/", "\nglab=" + dir + "/", "/glab\n", "\nsecret=session-secret\n", `marker={"state":"ready"`, "\n1\n", "drwx------\n-rw-------\n"} {
+		if !strings.Contains("\n"+output, want) {
+			t.Errorf("harness output lacks %q:\n%s", want, output)
+		}
+	}
+}
+
 // SIGKILL, as from a herdr pane that closes, leaves no chance to revoke: the
 // reaper, outside the launcher's session and process tree, must do it.
 func TestKilledLauncherIsReaped(t *testing.T) {

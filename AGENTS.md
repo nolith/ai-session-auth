@@ -17,14 +17,16 @@ dependencies outside the standard library.
     internal/procenv/          the environment as a map, shared by the session and glab
     internal/sessiondir/       the session directory: atomic writes, markers
     internal/ledger/           revocable credentials on disk, revoked across providers
-    internal/provider/         the Provider interface, shared types
-    internal/provider/gitlab/  one GitLab instance: its issuers, PATs, glab config
-    internal/provider/github/  GitHub App tokens: state file, refresh, gh config
+    internal/provider/         the Provider and Renderer interfaces, shared types,
+                               the Setup.Env merge
+    internal/provider/gitlab/  one GitLab instance: its issuers, PATs, the glab
+                               config.yml renderer
+    internal/provider/github/  GitHub App tokens: state file, refresh, the gh
+                               hosts.yml renderer
     internal/testutil/         test fixtures, fakes and the fake glab/gh scripts
 
 Later phases add the rest of the end state:
 
-    internal/provider/         the Renderer interface
     internal/sessiondir/       the session gitconfig
     internal/credhelper/       `geas credential`, Git's credential helper
     internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
@@ -49,7 +51,9 @@ Later phases add the rest of the end state:
   warning would scribble over the agent's TUI. Failures go to markers, to
   the reaper's log, and to `geas status`.
 - Credentials land, atomically, in the files `glab`, `gh`, git and ssh
-  already read. Nothing is hidden from a process running as the same user;
+  already read, in the session directory. A renderer replaces its files
+  whole, from every credential of its kind; its golden files under
+  `testdata/` pin the format, checked against the real tool. Nothing is hidden from a process running as the same user;
   that is the sandbox's job.
 
 ## Checks

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/procenv"
+	"github.com/nolith/geas/internal/sessiondir"
 )
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
@@ -38,7 +40,10 @@ func appendGitConfig(env map[string]string, entries [][2]string) error {
 // inheritedCredentials never reach the harness or the reaper.
 var inheritedCredentials = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
-func sessionEnvironment(settings config.Config, directory, address, binary string, base []string, lookup func(string) (string, error)) ([]string, error) {
+// sessionEnvironment is the harness's environment: base without inherited
+// credentials, with the providers' exported variables, the session's
+// directory, and Git configured for the session.
+func sessionEnvironment(settings config.Config, directory, address, binary string, base []string, lookup func(string) (string, error), dir *sessiondir.Dir, exported map[string]string) ([]string, error) {
 	env := procenv.Map(base)
 	for _, key := range inheritedCredentials {
 		delete(env, key)
@@ -71,24 +76,9 @@ func sessionEnvironment(settings config.Config, directory, address, binary strin
 	}
 	env["PATH"] = bin + string(os.PathListSeparator) + env["PATH"]
 	env["GEAS_SOCKET"] = address
-	env["GH_PROMPT_DISABLED"] = "1"
+	maps.Copy(env, exported)
+	env["GEAS_SESSION_DIR"] = dir.Path()
 	env["GIT_TERMINAL_PROMPT"] = "0"
-	for _, cli := range []string{"gh", "glab"} {
-		path := filepath.Join(directory, cli)
-		if err := os.Mkdir(path, 0700); err != nil {
-			return nil, err
-		}
-		content := "git_protocol: https\n"
-		key := "GH_CONFIG_DIR"
-		if cli == "glab" {
-			key = "GLAB_CONFIG_DIR"
-			content = "host: gitlab.com\nhosts:\n  gitlab.com:\n    git_protocol: https\n    api_protocol: https\n    api_host: gitlab.com\n"
-		}
-		if err := os.WriteFile(filepath.Join(path, "config.yml"), []byte(content), 0600); err != nil {
-			return nil, err
-		}
-		env[key] = path
-	}
 	entries := [][2]string{{"credential.helper", ""}, {"credential.helper", "!" + shellQuote(binary) + " _credential"}, {"credential.useHttpPath", "true"}}
 	for _, provider := range []struct {
 		host   string

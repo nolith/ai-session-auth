@@ -39,7 +39,8 @@ func NewID(now time.Time) (string, error) {
 	return now.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(random), nil
 }
 
-func path(id string) (string, error) {
+// Path is the directory a session with this ID has, or would have.
+func Path(id string) (string, error) {
 	if !sessionID.MatchString(id) {
 		return "", errors.New("invalid session ID")
 	}
@@ -54,7 +55,7 @@ func path(id string) (string, error) {
 // parent so that the ledger written next survives a crash. It refuses a
 // session ID already in use.
 func Create(id string) (*Dir, error) {
-	dir, err := path(id)
+	dir, err := Path(id)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +75,7 @@ func Create(id string) (*Dir, error) {
 // Open opens an existing session's directory by ID, as the reaper does once
 // the launcher is gone.
 func Open(id string) (*Dir, error) {
-	dir, err := path(id)
+	dir, err := Path(id)
 	if err != nil {
 		return nil, err
 	}

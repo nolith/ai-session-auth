@@ -326,8 +326,8 @@ A running `gh` command cannot replace its token while it executes; restart
 long-running watch commands if they cross a token expiry or rotation.
 
 A skipped optional provider stays unavailable for the whole session, and never
-falls back to your own login: its wrapper, temporary CLI configuration and
-credential helper remain in place. `gh` or `glab` then fails with
+falls back to your own login: its wrapper, CLI configuration directory in
+the session and credential helper remain in place. `gh` or `glab` then fails with
 "GitHub is not available in this session: <reason>" (or GitLab) without
 running the real CLI, and Git HTTPS to an allowlisted repository on that host
 fails at once, with the helper telling Git to quit rather than ask a terminal
@@ -360,8 +360,10 @@ wrapper. The real `gh` and `glab` run with the session's wrapper directory
 removed from `PATH`, so a version-manager shim, such as mise's, recorded as the
 real CLI and running the next one on `PATH` cannot loop back to the wrapper. A
 shim that calls the wrapper by its path fails with a "wrapper loop" error
-instead of spinning. CLI configuration directories are temporary; personal
-aliases, extensions, and preferences are not copied automatically.
+instead of spinning. `glab` and `gh` read their configuration from the
+session directory (`GLAB_CONFIG_DIR` and `GH_CONFIG_DIR` point there), where
+geas writes `glab/config.yml` and `gh/hosts.yml` with the session's
+credentials; personal aliases, extensions, and preferences are not copied.
 
 URL rewriting supports `git@github.com:owner/repo.git`,
 `ssh://git@github.com/...`, and their GitLab.com equivalents. SSH aliases and

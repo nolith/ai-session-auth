@@ -37,6 +37,8 @@
               ./go.mod
               ./config.example.json
               (lib.fileset.fileFilter (file: file.hasExt "go") ./.)
+              # The tests' golden files.
+              (lib.fileset.fileFilter (file: file.hasExt "yml" || file.hasExt "json") ./internal)
             ];
           };
           vendorHash = null;

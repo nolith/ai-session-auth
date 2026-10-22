@@ -1,6 +1,7 @@
 // Package testutil holds the fixtures and fakes several test packages share:
-// configuration values, an HTTP transport answering as a provider would, and
-// the fake glab script the provider and session tests run.
+// configuration values, an HTTP transport answering as a provider would, the
+// fake glab script the provider and session tests run, session directories
+// and golden files.
 package testutil
 
 import (
@@ -14,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/sessiondir"
 )
 
 // Bool returns a pointer to v, for the *bool enabled fields of a provider.
@@ -152,3 +155,37 @@ func Calls(t *testing.T, dir string) [][]string {
 }
 
 func quote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+// SessionDir creates a session directory under a new XDG_STATE_HOME.
+func SessionDir(t *testing.T) *sessiondir.Dir {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	id, err := sessiondir.NewID(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := sessiondir.Create(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Golden compares got with the golden file at path, below the test's
+// package. GEAS_UPDATE_GOLDEN=1 rewrites the file instead.
+func Golden(t *testing.T, path string, got []byte) {
+	t.Helper()
+	if os.Getenv("GEAS_UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(path, got, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("%s differs from the golden file; got:\n%s", path, got)
+	}
+}

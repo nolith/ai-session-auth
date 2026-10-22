@@ -1,13 +1,21 @@
 // Package provider holds what every credential source shares: the Provider
-// interface the session drives, and the credential it hands back. A provider
-// kind is one package below this one; this package imports none of them.
+// interface the session drives, what a provider adds to the session, the
+// credential it hands back, and the Renderer that turns credentials into a
+// tool's configuration. A provider kind is one package below this one; this
+// package imports none of them.
 package provider
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/nolith/geas/internal/ledger"
+	"github.com/nolith/geas/internal/sessiondir"
 )
 
 // A Provider is one credential source for one host, e.g. GitLab on
@@ -16,8 +24,11 @@ import (
 type Provider interface {
 	// ID is unique within a session, e.g. "gitlab:gitlab.com".
 	ID() string
-	// Kind groups providers of one kind: "gitlab", "github".
+	// Kind groups providers for their kind's Renderer: "gitlab", "github".
 	Kind() string
+	// Setup declares what the provider adds to the session before the
+	// harness starts. No network call; it must not block.
+	Setup() Setup
 	// Acquire returns the credential. Anything revocable is recorded in the
 	// ledger before the call that creates it.
 	Acquire(ctx context.Context, l *ledger.Ledger) (Credential, error)
@@ -31,11 +42,88 @@ type Provider interface {
 	Revoke(ctx context.Context, e ledger.Entry) error
 }
 
+// Setup is the part of a provider the session merges with the others.
+// Everything specific to one forge or tool stays in the provider's package;
+// only what several providers share, or the session itself acts on, is here.
+type Setup struct {
+	// Env is exported to the harness, e.g. GLAB_CONFIG_DIR and
+	// GH_PROMPT_DISABLED. "$GEAS_SESSION_DIR" expands to the session's
+	// directory. Two providers may set the same variable only to the same
+	// value, and none may set one of the session's own; see MergeEnv.
+	Env map[string]string
+	// Git lists the hosts git reaches over HTTPS with this provider's token.
+	Git []GitHost
+}
+
+// GitHost is all the session gitconfig and the credential helper need to
+// know about one host.
+type GitHost struct {
+	Host string
+	// Username is sent with the token; each forge defines its own.
+	Username string
+	// Namespaces are allowlist prefixes, by whole path segments: "group"
+	// covers "group/project" and "group/sub/project".
+	Namespaces []string
+	// Repositories are single repositories, matched exactly.
+	Repositories []string
+	// FoldCase compares paths in any letter case, as GitHub does.
+	FoldCase bool
+}
+
 // Credential is what a provider hands the session: the secret a tool sends,
-// and when it stops working.
+// the account it acts as, when it stops working, and any files that go with
+// it.
 type Credential struct {
-	Secret  string
+	Secret string
+	// User is the account the secret authenticates, for tools that record
+	// it next to the token, such as gh.
+	User    string
 	Expires time.Time
+	// Files are written into the session directory, by path relative to it,
+	// e.g. an ssh certificate.
+	Files map[string][]byte
+}
+
+// A Renderer writes the tool configuration that all providers of one kind
+// share, such as glab's config.yml with one entry per GitLab host. Each
+// kind's package supplies one; the session calls it whenever a credential of
+// that kind arrives or is refreshed, with every credential of the kind, by
+// provider ID. It replaces its files whole, through dir's atomic writes.
+type Renderer interface {
+	Kind() string
+	Render(dir *sessiondir.Dir, creds map[string]Credential) error
+}
+
+// envName is what an exported variable's name may look like.
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// MergeEnv merges the Setup.Env of every provider. Two providers may set one
+// variable only to the same value (every GitLab instance sets
+// GLAB_CONFIG_DIR alike); a different value, or a variable the session owns,
+// as reserved reports, is a configuration error.
+func MergeEnv(providers []Provider, reserved func(name string) bool) (map[string]string, error) {
+	merged := map[string]string{}
+	setBy := map[string]string{}
+	for _, p := range providers {
+		env := p.Setup().Env
+		for _, name := range slices.Sorted(maps.Keys(env)) {
+			value := env[name]
+			if !envName.MatchString(name) || strings.ContainsRune(value, 0) {
+				return nil, fmt.Errorf("provider %s exports an invalid variable", p.ID())
+			}
+			if reserved(name) {
+				return nil, fmt.Errorf("provider %s sets %s, which the session owns", p.ID(), name)
+			}
+			if other, ok := setBy[name]; ok && merged[name] != value {
+				return nil, fmt.Errorf("providers %s and %s set %s to different values", other, p.ID(), name)
+			}
+			if _, ok := setBy[name]; !ok {
+				setBy[name] = p.ID()
+			}
+			merged[name] = value
+		}
+	}
+	return merged, nil
 }
 
 // CreatedError is an Acquire failure that came after the credential was
