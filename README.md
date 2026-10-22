@@ -50,8 +50,10 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
   projects, without PAT management permissions in the agent token.
 - Username verification on both providers before starting the harness.
 - `gh` and `glab` wrappers that retrieve the current token and invoke the original CLIs.
-- A Git credential helper that checks protocol, hostname, and repository path.
-- Temporary SSH-to-HTTPS URL rewriting through process-level Git configuration.
+- A Git credential helper, `geas credential`, that checks protocol, hostname,
+  and repository path, and answers from the session directory.
+- SSH-to-HTTPS URL rewriting through a session gitconfig, included last from
+  the process environment; your Git configuration on disk is unchanged.
 - GitLab PAT revocation on normal exit, Ctrl-C, SIGTERM, SIGHUP (a closed
   terminal or pane), or the session time limit, and by a detached reaper when
   the launcher is killed outright.

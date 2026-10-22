@@ -16,58 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/testutil"
 )
-
-func TestBrokerRepositoryBoundaries(t *testing.T) {
-	now := time.Now()
-	b := &broker{Config: testutil.Config(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }, GitLabToken: "gl-test"}
-	for _, tc := range []struct{ host, path, protocol, want string }{
-		{"github.com", "/ALICE/repo.git", "https", "ghu_test"},
-		{"gitlab.com", "group/project.git", "https", "gl-test"},
-		{"github.com", "alice/other", "https", ""},
-		{"github.com.evil", "alice/repo", "https", ""},
-		{"github.com", "alice/repo", "http", ""},
-		{"github.com", "alice/../repo", "https", ""},
-		{"github.com", "alice/%72epo", "https", ""},
-		{"gitlab.com", "GROUP/project", "https", ""},
-	} {
-		r, err := b.answer(context.Background(), brokerRequest{Service: "git", Host: tc.host, Path: tc.path, Protocol: tc.protocol})
-		if err != nil || r.Token != tc.want {
-			t.Fatalf("%+v: %+v %v", tc, r, err)
-		}
-	}
-	b.Deadline = now
-	if _, err := b.answer(context.Background(), brokerRequest{Service: "github"}); err == nil {
-		t.Fatal("issued token after expiry")
-	}
-}
-
-func TestCredentialProtocol(t *testing.T) {
-	var out bytes.Buffer
-	calls := 0
-	query := func(r brokerRequest) (brokerResponse, error) {
-		calls++
-		if r.Host != "github.com" || r.Path != "alice/repo.git" {
-			t.Error("bad request")
-		}
-		return brokerResponse{Username: "x-access-token", Token: "test-token"}, nil
-	}
-	if err := credentialWith("get", strings.NewReader("protocol=https\nhost=github.com\npath=alice/repo.git\n\n"), &out, query); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "username=x-access-token\npassword=test-token\n\n" {
-		t.Fatal("bad helper response")
-	}
-	if err := credentialWith("store", strings.NewReader("password=secret"), &out, query); err != nil || calls != 1 {
-		t.Fatal("store operation accessed broker")
-	}
-}
 
 func TestBrokerSkippedProviders(t *testing.T) {
 	now := time.Now()
@@ -78,28 +33,11 @@ func TestBrokerSkippedProviders(t *testing.T) {
 	}{
 		{brokerRequest{Service: "github"}, "GitHub is not available in this session: no login"},
 		{brokerRequest{Service: "gitlab"}, "GitLab is not available in this session: issuer failed"},
-		{brokerRequest{Service: "git", Protocol: "https", Host: "github.com", Path: "alice/repo.git"}, "GitHub is not available in this session: no login"},
-		{brokerRequest{Service: "git", Protocol: "https", Host: "gitlab.com", Path: "group/project.git"}, "GitLab is not available in this session: issuer failed"},
 	} {
 		r, err := b.answer(context.Background(), tc.request)
 		if err == nil || err.Error() != tc.want || r.Token != "" || !errors.As(err, new(unavailableError)) {
 			t.Errorf("%+v: %+v %v", tc.request, r, err)
 		}
-	}
-	// Outside the allowlist the helper stays silent, as for any provider.
-	if r, err := b.answer(context.Background(), brokerRequest{Service: "git", Protocol: "https", Host: "github.com", Path: "alice/other"}); err != nil || r.Token != "" {
-		t.Fatalf("%+v %v", r, err)
-	}
-}
-
-func TestCredentialQuitsForSkippedProvider(t *testing.T) {
-	var out bytes.Buffer
-	query := func(brokerRequest) (brokerResponse, error) {
-		return brokerResponse{Quit: true}, errors.New("GitLab is not available in this session: issuer failed")
-	}
-	err := credentialWith("get", strings.NewReader("protocol=https\nhost=gitlab.com\npath=group/project.git\n\n"), &out, query)
-	if err == nil || out.String() != "quit=1\n\n" {
-		t.Fatalf("%q %v", out.String(), err)
 	}
 }
 
@@ -108,7 +46,15 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	binary := "/tmp/test 'auth'"
 	base := append(os.Environ(), "GH_TOKEN=old-secret", "GITLAB_TOKEN=old-secret", "SSH_AUTH_SOCK=old-socket", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=Alice")
 	session := testutil.SessionDir(t)
-	values, err := sessionEnvironment(testutil.Config(), dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil }, session, map[string]string{"GLAB_CONFIG_DIR": session.Path() + "/glab"})
+	c := testutil.Config()
+	hosts, err := credhelper.Hosts([]provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writeGitConfig(session, binary, hosts); err != nil {
+		t.Fatal(err)
+	}
+	values, err := sessionEnvironment(c, dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil }, session, map[string]string{"GLAB_CONFIG_DIR": session.Path() + "/glab"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +67,9 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 			t.Errorf("inherited %s", key)
 		}
 	}
-	if env["GIT_CONFIG_KEY_0"] != "user.name" {
-		t.Fatal("lost inherited config")
+	// One include, after what the harness inherited.
+	if env["GIT_CONFIG_COUNT"] != "2" || env["GIT_CONFIG_KEY_0"] != "user.name" || env["GIT_CONFIG_KEY_1"] != "include.path" || env["GIT_CONFIG_VALUE_1"] != filepath.Join(session.Path(), "gitconfig") {
+		t.Fatalf("Git configuration: %v", env)
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "bin", "gh"))
 	if !strings.Contains(string(raw), shellQuote(binary)) {
@@ -138,11 +85,11 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(output)) != "https://github.com/alice/repo.git" {
 		t.Fatalf("rewrite: %s %v", output, err)
 	}
-	cmd = exec.Command(git, "config", "--get-all", "credential.helper")
+	cmd = exec.Command(git, "config", "--get-all", "credential.https://gitlab.com.helper")
 	cmd.Env = values
 	output, err = cmd.Output()
-	if err != nil || !strings.HasSuffix(string(output), "!"+shellQuote(binary)+" _credential\n") {
-		t.Fatalf("helper: %s %v", output, err)
+	if err != nil || string(output) != "\n!"+shellQuote(binary)+" credential\n" {
+		t.Fatalf("helper: %q %v", output, err)
 	}
 }
 
@@ -237,85 +184,6 @@ func TestIssuerReadCancellation(t *testing.T) {
 	cancel()
 	if _, err = ReadIssuer(ctx, read, new(bytes.Buffer), true); err != context.Canceled {
 		t.Fatalf("%v", err)
-	}
-}
-
-func TestBrokerGitLabNamespaces(t *testing.T) {
-	now := time.Now()
-	c := testutil.Config()
-	c.GitLab = testutil.NamespacedConfig()
-	b := &broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitLabToken: "gl-test"}
-	for _, tc := range []struct {
-		path string
-		want bool
-	}{
-		{"group/project.git", true},
-		{"group/sub/deeper/project", true},
-		{"other/sub/project", true},
-		{"alice/dotfiles.git", true},
-		{"elsewhere/project", true},
-		{"group-foo/project", false},
-		{"groupx/project", false},
-		{"other/subway/project", false},
-		{"other/project", false},
-		{"elsewhere/project-2", false},
-		{"elsewhere/project/sub", false},
-		{"alice-bot/project", false},
-		{"GROUP/project", false},
-		{"group", false},
-		{"group/../evil/project", false},
-		{"group/%2e%2e/evil", false},
-	} {
-		r, err := b.answer(context.Background(), brokerRequest{Service: "git", Host: "gitlab.com", Path: tc.path, Protocol: "https"})
-		if err != nil || (r.Token != "") != tc.want {
-			t.Errorf("%+v: %+v %v", tc, r, err)
-		}
-	}
-	b.Config.GitLab.PersonalProjects = false
-	if r, _ := b.answer(context.Background(), brokerRequest{Service: "git", Host: "gitlab.com", Path: "alice/dotfiles", Protocol: "https"}); r.Token != "" {
-		t.Fatal("personal project allowed without personal_projects")
-	}
-}
-
-func TestBrokerGitHubOwners(t *testing.T) {
-	now := time.Now()
-	c := testutil.Config()
-	c.GitHub.Owners = []string{"nolith", "Some-Org"}
-	b := &broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }}
-	for _, tc := range []struct {
-		path string
-		want bool
-	}{
-		{"nolith/anything.git", true},
-		{"NOLITH/Anything", true},
-		{"some-org/repo", true},
-		{"alice/repo", true},
-		{"ALICE/REPO.git", true},
-		{"nolith-foo/repo", false},
-		{"nolithx/repo", false},
-		{"no/lith/repo", false},
-		{"nolith", false},
-		{"alice/other", false},
-		{"someone-else/x", false},
-		{"nolith/../evil/x", false},
-		{"nolith/%2e%2e/x", false},
-	} {
-		r, err := b.answer(context.Background(), brokerRequest{Service: "git", Host: "github.com", Path: tc.path, Protocol: "https"})
-		if err != nil || (r.Token != "") != tc.want {
-			t.Errorf("%+v: %+v %v", tc, r, err)
-		}
-	}
-	// Owners alone, without explicit repositories.
-	b.Config.GitHub.Repositories = nil
-	if r, _ := b.answer(context.Background(), brokerRequest{Service: "git", Host: "github.com", Path: "alice/repo", Protocol: "https"}); r.Token != "" {
-		t.Fatal("repository allowed after removing it")
-	}
-	if r, _ := b.answer(context.Background(), brokerRequest{Service: "git", Host: "github.com", Path: "nolith/repo", Protocol: "https"}); r.Token == "" {
-		t.Fatal("owner not allowed without repositories")
-	}
-	// GitLab stays case-sensitive whatever the GitHub owners.
-	if gitlabAllowed(config.GitLabConfig{Groups: []string{"nolith"}}, "NOLITH/project") {
-		t.Fatal("GitLab group matched in another case")
 	}
 }
 

@@ -1,10 +1,8 @@
 package session
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -14,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/sessiondir"
 )
@@ -79,21 +78,28 @@ func sessionEnvironment(settings config.Config, directory, address, binary strin
 	maps.Copy(env, exported)
 	env["GEAS_SESSION_DIR"] = dir.Path()
 	env["GIT_TERMINAL_PROMPT"] = "0"
-	entries := [][2]string{{"credential.helper", ""}, {"credential.helper", "!" + shellQuote(binary) + " _credential"}, {"credential.useHttpPath", "true"}}
-	for _, provider := range []struct {
-		host   string
-		active bool
-	}{{"github.com", config.Enabled(settings.GitHub.Enabled)}, {"gitlab.com", config.Enabled(settings.GitLab.Enabled)}} {
-		if provider.active {
-			for _, prefix := range []string{"git@" + provider.host + ":", "ssh://git@" + provider.host + "/"} {
-				entries = append(entries, [2]string{"url.https://" + provider.host + "/.insteadOf", prefix})
-			}
-		}
-	}
-	if err := appendGitConfig(env, entries); err != nil {
+	// Last, after anything inherited: the session's gitconfig wins.
+	if err := appendGitConfig(env, [][2]string{{"include.path", filepath.Join(dir.Path(), sessiondir.GitConfigFile)}}); err != nil {
 		return nil, err
 	}
 	return procenv.List(env), nil
+}
+
+// writeGitConfig writes the session's gitconfig, naming this binary as the
+// credential helper of every host, and the hosts the helper answers for.
+func writeGitConfig(dir *sessiondir.Dir, binary string, hosts []credhelper.Host) error {
+	names := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		names = append(names, h.Host)
+	}
+	raw, err := sessiondir.GitConfig("!"+shellQuote(binary)+" credential", names)
+	if err != nil {
+		return err
+	}
+	if err = dir.WriteFile(sessiondir.GitConfigFile, raw); err != nil {
+		return err
+	}
+	return credhelper.WriteHosts(dir, hosts)
 }
 
 // proxyMark is set for the real CLI and everything it starts. Entering the
@@ -147,46 +153,6 @@ func ProxyCLI(service, executable string, args []string) error {
 	return syscall.Exec(executable, append([]string{executable}, args...), procenv.List(environment))
 }
 
-// Credential answers one Git credential request, as `geas _credential` runs
-// it, with the session broker the only source of answers.
-func Credential(operation string, input io.Reader, output io.Writer) error {
-	return credentialWith(operation, input, output, rpc)
-}
-func credentialWith(operation string, input io.Reader, output io.Writer, request func(brokerRequest) (brokerResponse, error)) error {
-	if operation != "get" {
-		return nil
-	}
-	scanner := bufio.NewScanner(io.LimitReader(input, 8192))
-	values := map[string]string{}
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			break
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if ok {
-			values[key] = value
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return errors.New("invalid Git credential request")
-	}
-	response, err := request(brokerRequest{Service: "git", Protocol: values["protocol"], Host: values["host"], Path: values["path"]})
-	if response.Quit {
-		// Git then fails at once, with no askpass or terminal prompt.
-		fmt.Fprint(output, "quit=1\n\n")
-	}
-	if err != nil {
-		return err
-	}
-	if response.Token != "" {
-		if strings.ContainsAny(response.Token+response.Username, "\r\n") {
-			return errors.New("invalid credential response")
-		}
-		_, err = fmt.Fprintf(output, "username=%s\npassword=%s\n\n", response.Username, response.Token)
-	}
-	return err
-}
 func executablePath() (string, error) {
 	binary, err := os.Executable()
 	if err != nil {

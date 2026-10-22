@@ -1,0 +1,160 @@
+// Package credhelper is `geas credential`, the Git credential helper a
+// session's gitconfig names for each host. It runs inside the session, finds
+// it through GEAS_SESSION_DIR, and answers from the session directory alone:
+// the hosts and allowlists the session recorded, the providers' markers and
+// their secrets.
+package credhelper
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/nolith/geas/internal/provider"
+	"github.com/nolith/geas/internal/sessiondir"
+)
+
+// hostsFile lists the hosts the helper answers for, written once by the
+// session before the harness starts.
+const hostsFile = "git/hosts.json"
+
+// Host is one provider.GitHost as the session records it, with the provider
+// whose secret answers for it.
+type Host struct {
+	Provider     string   `json:"provider"`
+	Host         string   `json:"host"`
+	Username     string   `json:"username"`
+	Namespaces   []string `json:"namespaces,omitempty"`
+	Repositories []string `json:"repositories,omitempty"`
+	FoldCase     bool     `json:"fold_case,omitempty"`
+}
+
+func (h Host) gitHost() provider.GitHost {
+	return provider.GitHost{Host: h.Host, Username: h.Username, Namespaces: h.Namespaces, Repositories: h.Repositories, FoldCase: h.FoldCase}
+}
+
+// Hosts collects every provider's Git hosts, and refuses a host two
+// providers claim.
+func Hosts(providers []provider.Provider) ([]Host, error) {
+	var hosts []Host
+	seen := map[string]string{}
+	for _, p := range providers {
+		for _, g := range p.Setup().Git {
+			if other, ok := seen[g.Host]; ok {
+				return nil, fmt.Errorf("providers %s and %s both serve Git on %s", other, p.ID(), g.Host)
+			}
+			seen[g.Host] = p.ID()
+			hosts = append(hosts, Host{Provider: p.ID(), Host: g.Host, Username: g.Username, Namespaces: g.Namespaces, Repositories: g.Repositories, FoldCase: g.FoldCase})
+		}
+	}
+	return hosts, nil
+}
+
+// WriteHosts records the hosts in the session directory for the helper.
+func WriteHosts(dir *sessiondir.Dir, hosts []Host) error {
+	raw, err := json.Marshal(hosts)
+	if err != nil {
+		return err
+	}
+	return dir.WriteFile(hostsFile, raw)
+}
+
+// Run serves `geas credential <operation>` for the session GEAS_SESSION_DIR
+// names. Only get answers; Git's store and erase have nothing to do, since
+// the session owns its credentials.
+func Run(operation string, input io.Reader, output io.Writer) error {
+	if operation != "get" {
+		return nil
+	}
+	dir, err := sessiondir.FromEnv()
+	if err != nil {
+		return err
+	}
+	return Get(dir, input, output)
+}
+
+// Get answers one Git credential request from dir. Outside the allowlist,
+// or for another protocol or host, it answers nothing, and Git, with no other
+// helper and no prompt, fails. For a provider that failed or is not ready it
+// tells Git to quit, with the reason, so that nothing falls back to the
+// user's own credentials.
+func Get(dir *sessiondir.Dir, input io.Reader, output io.Writer) error {
+	request, err := readRequest(input)
+	if err != nil {
+		return err
+	}
+	if request["protocol"] != "https" {
+		return nil
+	}
+	raw, err := dir.ReadFile(hostsFile)
+	if err != nil {
+		return err
+	}
+	var hosts []Host
+	if err = json.Unmarshal(raw, &hosts); err != nil {
+		return errors.New("invalid session host list")
+	}
+	var host *Host
+	for i := range hosts {
+		if hosts[i].Host == request["host"] {
+			host = &hosts[i]
+		}
+	}
+	if host == nil || !host.gitHost().Allows(request["path"]) {
+		return nil
+	}
+	marker, err := dir.Marker(host.Provider)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Background acquisition will wait here for the marker, briefly,
+		// before giving up.
+		return quit(output, host.Host+" credentials are not ready in this session")
+	case err != nil:
+		return err
+	case marker.State != sessiondir.Ready:
+		return quit(output, host.Host+" is not available in this session: "+marker.Reason)
+	}
+	file, err := sessiondir.ProviderFile("secrets", host.Provider)
+	if err != nil {
+		return err
+	}
+	secret, err := dir.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	if len(secret) == 0 || strings.ContainsAny(string(secret)+host.Username, "\r\n\x00") {
+		return errors.New("invalid session credential")
+	}
+	_, err = fmt.Fprintf(output, "username=%s\npassword=%s\n\n", host.Username, secret)
+	return err
+}
+
+// quit tells Git to stop at once, with no askpass or terminal prompt, and
+// returns the reason as the error the helper prints.
+func quit(output io.Writer, reason string) error {
+	fmt.Fprint(output, "quit=1\n\n")
+	return errors.New(reason)
+}
+
+// readRequest reads Git's key=value lines, up to the blank line or EOF.
+func readRequest(input io.Reader) (map[string]string, error) {
+	scanner := bufio.NewScanner(io.LimitReader(input, 8192))
+	values := map[string]string{}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			break
+		}
+		if key, value, ok := strings.Cut(line, "="); ok {
+			values[key] = value
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, errors.New("invalid Git credential request")
+	}
+	return values, nil
+}

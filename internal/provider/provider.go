@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/sessiondir"
 )
@@ -68,6 +69,31 @@ type GitHost struct {
 	Repositories []string
 	// FoldCase compares paths in any letter case, as GitHub does.
 	FoldCase bool
+}
+
+// Allows reports whether a repository path, as Git sends it, is in the
+// allowlist: one of Repositories exactly, or inside one of Namespaces by
+// whole leading segments, so "gitlab-org" never matches "gitlab-org-foo/x".
+// A path that could name another repository (empty segments, "..", escapes)
+// is refused.
+func (h GitHost) Allows(path string) bool {
+	path, ok := config.NormalizeGitPath(path)
+	if !ok {
+		return false
+	}
+	same := func(a, b string) bool {
+		if h.FoldCase {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
+	}
+	if slices.ContainsFunc(h.Repositories, func(repo string) bool { return same(repo, path) }) {
+		return true
+	}
+	return slices.ContainsFunc(h.Namespaces, func(namespace string) bool {
+		prefix := namespace + "/"
+		return len(path) > len(prefix) && same(path[:len(prefix)], prefix)
+	})
 }
 
 // Credential is what a provider hands the session: the secret a tool sends,

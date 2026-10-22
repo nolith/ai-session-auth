@@ -25,7 +25,7 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 
 // TestMain lets a test re-execute this binary as the launcher itself, with
 // main's own signal handling, by passing its arguments as JSON. The launcher
-// re-executes it too, as "_reaper" or "_proxy".
+// re-executes it too, as "_reaper" or "_proxy", and Git as "credential".
 func TestMain(m *testing.M) {
 	if raw, ok := os.LookupEnv("GEAS_TEST_ARGS"); ok {
 		os.Unsetenv("GEAS_TEST_ARGS")
@@ -36,8 +36,9 @@ func TestMain(m *testing.M) {
 		os.Args = append([]string{"geas"}, args...)
 		main()
 	}
-	// The launcher's own re-executions: the reaper, and gh/glab through _proxy.
-	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "_") {
+	// The launcher's own re-executions: the reaper, gh/glab through _proxy,
+	// and Git's credential helper.
+	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential") {
 		main()
 	}
 	os.Exit(m.Run())

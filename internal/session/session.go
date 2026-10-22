@@ -20,6 +20,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
@@ -226,8 +227,8 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		gitlabFix = "glab auth login"
 	}
 	// A skipped optional provider keeps its wrapper, configuration directory
-	// and credential helper, whose answer is then an error: never your own
-	// credentials.
+	// and credential helper, whose answer is then an error, from its marker:
+	// never your own credentials.
 	var githubSkipped, gitlabSkipped string
 	// Before the session's own wrappers exist: a glab issuer resolves the glab
 	// on your PATH.
@@ -272,12 +273,20 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if err != nil {
 		return 1, err
 	}
+	hosts, err := credhelper.Hosts(providers)
+	if err != nil {
+		return 1, err
+	}
 	dir, err := sessiondir.Create(id)
 	if err != nil {
 		return 1, err
 	}
 	book, err := ledger.Create(dir)
 	if err != nil {
+		dir.Remove()
+		return 1, err
+	}
+	if err = writeGitConfig(dir, binary, hosts); err != nil {
 		dir.Remove()
 		return 1, err
 	}

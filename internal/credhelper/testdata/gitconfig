@@ -1,0 +1,24 @@
+# Written by geas for this session.
+[core]
+	sshCommand = "ssh -o IdentityAgent=none -o BatchMode=yes"
+[url "https://gitlab.com/"]
+	insteadOf = "git@gitlab.com:"
+	insteadOf = "ssh://git@gitlab.com/"
+[credential "https://gitlab.com"]
+	helper = ""
+	helper = "!'/nix/store/x-geas/bin/geas' credential"
+	useHttpPath = true
+[url "https://ops.gitlab.net/"]
+	insteadOf = "git@ops.gitlab.net:"
+	insteadOf = "ssh://git@ops.gitlab.net/"
+[credential "https://ops.gitlab.net"]
+	helper = ""
+	helper = "!'/nix/store/x-geas/bin/geas' credential"
+	useHttpPath = true
+[url "https://github.com/"]
+	insteadOf = "git@github.com:"
+	insteadOf = "ssh://git@github.com/"
+[credential "https://github.com"]
+	helper = ""
+	helper = "!'/nix/store/x-geas/bin/geas' credential"
+	useHttpPath = true

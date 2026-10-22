@@ -12,6 +12,7 @@ import (
 
 	"github.com/nolith/geas/internal/api"
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/session"
@@ -25,6 +26,7 @@ Commands:
   github-login                  Authorize your GitHub App once via device flow
   save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600 (not with issuer "glab")
   run -- HARNESS [ARGS...]       Start a session with user credentials
+  credential get                Git's credential helper, inside a session
 
 Requires gh, glab and Git in PATH for enabled providers. Linux/macOS only.`)
 }
@@ -38,12 +40,12 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	if len(args) > 0 && args[0] == "_reaper" {
 		return 0, session.RunReaper(ctx, args[1:])
 	}
-	if len(args) > 0 && args[0] == "_credential" {
-		operation := "get"
-		if len(args) > 1 {
-			operation = args[1]
+	// Git runs the helper inside a session, which has no configuration path.
+	if len(args) > 0 && args[0] == "credential" {
+		if len(args) != 2 {
+			return 2, errors.New("usage: geas credential get")
 		}
-		return 0, session.Credential(operation, os.Stdin, os.Stdout)
+		return 0, credhelper.Run(args[1], os.Stdin, os.Stdout)
 	}
 	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)

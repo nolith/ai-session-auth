@@ -9,8 +9,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,10 +16,7 @@ import (
 )
 
 type brokerRequest struct {
-	Service  string `json:"service"`
-	Protocol string `json:"protocol,omitempty"`
-	Host     string `json:"host,omitempty"`
-	Path     string `json:"path,omitempty"`
+	Service string `json:"service"`
 }
 type brokerResponse struct {
 	Token    string `json:"token,omitempty"`
@@ -55,32 +50,6 @@ func (b *broker) answer(ctx context.Context, request brokerRequest) (brokerRespo
 		return brokerResponse{}, errors.New("session expired")
 	}
 	service := request.Service
-	if service == "git" {
-		if request.Protocol != "https" {
-			return brokerResponse{}, nil
-		}
-		switch request.Host {
-		case "github.com":
-			service = "github"
-		case "gitlab.com":
-			service = "gitlab"
-		default:
-			return brokerResponse{}, nil
-		}
-		path, ok := config.NormalizeGitPath(request.Path)
-		if !ok {
-			return brokerResponse{}, nil
-		}
-		var permitted bool
-		if service == "github" {
-			permitted = githubAllowed(b.Config.GitHub, path)
-		} else {
-			permitted = gitlabAllowed(b.Config.GitLab, path)
-		}
-		if !permitted {
-			return brokerResponse{}, nil
-		}
-	}
 	switch service {
 	case "github":
 		if b.GitHubSkipped != "" {
@@ -104,34 +73,6 @@ func (b *broker) answer(ctx context.Context, request brokerRequest) (brokerRespo
 		}
 	}
 	return brokerResponse{}, errors.New("service not enabled")
-}
-
-// githubAllowed reports whether a Git path is an allowed repository or inside
-// an allowed owner, by whole leading segment like gitlabAllowed. GitHub names
-// are case-insensitive, so the comparison is too.
-func githubAllowed(c config.GitHubConfig, path string) bool {
-	if slices.ContainsFunc(c.Repositories, func(repo string) bool { return strings.EqualFold(repo, path) }) {
-		return true
-	}
-	return slices.ContainsFunc(c.Owners, func(owner string) bool {
-		prefix := owner + "/"
-		return len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
-	})
-}
-
-// gitlabAllowed reports whether a Git path is inside the configured namespaces:
-// whole leading segments only, so "gitlab-org" never matches "gitlab-org-foo".
-// Explicit projects and the earlier format's repositories match exactly.
-func gitlabAllowed(c config.GitLabConfig, path string) bool {
-	if slices.Contains(c.Repositories, path) || slices.Contains(c.Projects, path) {
-		return true
-	}
-	// A copy: concurrent requests share the configuration.
-	namespaces := slices.Clone(c.Groups)
-	if c.PersonalProjects {
-		namespaces = append(namespaces, c.ExpectedUser)
-	}
-	return slices.ContainsFunc(namespaces, func(namespace string) bool { return strings.HasPrefix(path, namespace+"/") })
 }
 
 type brokerServer struct {
