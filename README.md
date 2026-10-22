@@ -377,7 +377,9 @@ persistent state. Concurrent sessions for the same App and user share the
 current GitHub credential: shortly before it expires, each launcher refreshes
 it in the state file, under its lock (or picks up the token another session
 rotated there), and rewrites its own session's `gh/hosts.yml` and secret. A
-refresh that fails is retried every minute, silently. The launcher does
+refresh that fails is retried every minute, silently; once the token has
+expired with no replacement, GitHub's marker turns `failed`, with the reason,
+so that Git's helper says why, and the next token makes it `ready` again. The launcher does
 not revoke GitHub credentials on exit, which would invalidate other sessions
 or the refresh token. A copied access token remains valid until its actual
 expiry or earlier invalidation by GitHub.
@@ -529,7 +531,7 @@ allowlists, the session directory (modes, atomic writes, markers), the glab,
 gh, gitconfig, sandbox policy and nono renderers against golden files, the
 `Setup.Env` merge, each tool's configuration directory per override and per
 OS, the Git credential helper with real Git, the sandbox check, the GitHub
-refresh, exit codes, process-group timeouts, revocation after SIGHUP with the
+refresh and its markers with a fake clock, exit codes, process-group timeouts, revocation after SIGHUP with the
 output gone, the ledger, the reaper after SIGKILL (also during the mint,
 finding the PAT by name) and its silence after a clean exit, nested sessions,
 cancellable issuer input, the harness starting before any provider step,

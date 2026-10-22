@@ -379,7 +379,7 @@ func acquire(ctx context.Context, store *credentials, book *ledger.Ledger, p pro
 		// name the ledger holds.
 		settler.Settle(ctx, book)
 	}
-	keepFresh(ctx, store, p, c)
+	keepFresh(ctx, store, p, c, systemClock)
 }
 
 // refreshMargin is how long before a credential expires keepFresh replaces
@@ -387,30 +387,57 @@ func acquire(ctx context.Context, store *credentials, book *ledger.Ledger, p pro
 // refreshRetry is the pause after a refresh that failed or changed nothing.
 var refreshMargin, refreshRetry = 4 * time.Minute, time.Minute
 
+// clock is what keepFresh reads the time and waits with; the tests' clock
+// moves only when it is told to wait.
+type clock struct {
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+var systemClock = clock{now: time.Now, sleep: timing.SleepContext}
+
 // keepFresh replaces c in the session directory before it expires, for as
 // long as ctx lasts: a GitHub App token lasts eight hours, a session up to
 // 48. Another session may have rotated the token already; Refresh then
-// returns that one. A failure keeps the current credential and retries;
-// nothing prints, as the harness owns the terminal. A credential that never
-// expires within the session, such as a GitLab session PAT, only waits.
-func keepFresh(ctx context.Context, store *credentials, p provider.Provider, c provider.Credential) {
+// returns that one. A failure keeps the current credential and retries
+// while it is still valid; once it has expired with no replacement, p's
+// marker turns failed, with the reason, and the next replacement makes it
+// ready again. Nothing prints, as the harness owns the terminal. A
+// credential that never expires within the session, such as a GitLab
+// session PAT, only waits.
+func keepFresh(ctx context.Context, store *credentials, p provider.Provider, c provider.Credential, clk clock) {
 	if c.Expires.IsZero() {
 		return
 	}
+	expired := false
 	for {
-		wait := time.Until(c.Expires.Add(-refreshMargin))
+		wait := c.Expires.Add(-refreshMargin).Sub(clk.now())
 		if wait < refreshRetry {
 			wait = refreshRetry
 		}
-		if timing.SleepContext(ctx, wait) != nil {
+		if clk.sleep(ctx, wait) != nil {
 			return
 		}
 		next, err := p.Refresh(ctx, c)
-		if err != nil || !next.Expires.After(c.Expires) || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil && next.Expires.After(c.Expires) {
+			if err = store.put(p, next); err == nil {
+				c = next
+				if expired && mark(store.dir, p.ID(), sessiondir.Ready, "") == nil {
+					expired = false
+				}
+				continue
+			}
+		}
+		if expired || clk.now().Before(c.Expires) {
 			continue
 		}
-		if store.put(p, next) == nil {
-			c = next
+		why := "credential expired, and no newer one is available yet"
+		if err != nil {
+			why = "credential expired, and refreshing it failed: " + reason(err)
 		}
+		expired = mark(store.dir, p.ID(), sessiondir.Failed, why) == nil
 	}
 }

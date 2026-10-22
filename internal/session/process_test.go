@@ -22,6 +22,7 @@ import (
 	"github.com/nolith/geas/internal/provider/gitlab"
 	"github.com/nolith/geas/internal/sandbox"
 	"github.com/nolith/geas/internal/secretfile"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -205,7 +206,7 @@ func TestKeepFresh(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { keepFresh(ctx, store, p, first); close(done) }()
+	go func() { keepFresh(ctx, store, p, first, systemClock); close(done) }()
 	for want := 1; want <= 2; want++ {
 		select {
 		case n := <-p.calls:
@@ -224,5 +225,79 @@ func TestKeepFresh(t *testing.T) {
 	}
 	if secret, _ := session.ReadFile("secrets/github:github.com"); string(secret) == "ghu_0" {
 		t.Fatal("secret not refreshed")
+	}
+}
+
+// fakeClock moves only when keepFresh waits, by as long as it waits.
+type fakeClock struct{ now time.Time }
+
+func (f *fakeClock) clock() clock {
+	return clock{now: func() time.Time { return f.now }, sleep: func(ctx context.Context, d time.Duration) error {
+		f.now = f.now.Add(d)
+		return ctx.Err()
+	}}
+}
+
+// scripted is a GitHub provider whose Refresh answers from a script, one
+// entry per call, and records the marker the helper would see at each call.
+type scripted struct {
+	*github.Provider
+	dir     *sessiondir.Dir
+	clock   *fakeClock
+	answers []error // nil hands out a token valid for eight more hours
+	seen    []string
+	stop    context.CancelFunc
+}
+
+func (s *scripted) Refresh(_ context.Context, c provider.Credential) (provider.Credential, error) {
+	m, _ := s.dir.Marker(s.ID())
+	s.seen = append(s.seen, m.State+" "+m.Reason)
+	if len(s.seen) > len(s.answers) {
+		s.stop()
+		return provider.Credential{}, errors.New("stopped")
+	}
+	if err := s.answers[len(s.seen)-1]; err != nil {
+		return provider.Credential{}, err
+	}
+	return provider.Credential{Secret: fmt.Sprintf("ghu_%d", len(s.seen)), User: c.User, Expires: s.clock.now.Add(8 * time.Hour)}, nil
+}
+
+// With a fake clock: a refresh that fails while the token is valid leaves
+// the marker ready and retries every minute; once the token has expired the
+// marker says why; the next token makes it ready again.
+func TestKeepFreshMarksAnExpiredCredential(t *testing.T) {
+	session := testutil.SessionDir(t)
+	store := newCredentials(session)
+	start := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
+	clk := &fakeClock{now: start}
+	down := errors.New("GitHub refresh failed; reauthorize with github-login")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &scripted{Provider: github.New(testutil.Config().GitHub, nil), dir: session, clock: clk, stop: cancel,
+		// At 7:56, 7:57, 7:58, 7:59 and 8:00, then 8:01.
+		answers: []error{down, down, down, down, down, nil}}
+	first := provider.Credential{Secret: "ghu_0", User: "alice", Expires: start.Add(8 * time.Hour)}
+	if err := store.put(p, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := mark(session, p.ID(), sessiondir.Ready, ""); err != nil {
+		t.Fatal(err)
+	}
+	keepFresh(ctx, store, p, first, clk.clock())
+	expired := "failed credential expired, and refreshing it failed: " + down.Error()
+	want := []string{"ready ", "ready ", "ready ", "ready ", "ready ", expired, "ready "}
+	if !slices.Equal(p.seen, want) {
+		t.Fatalf("markers at each refresh:\n%q\nwant\n%q", p.seen, want)
+	}
+	// The last wait is until four minutes before the new token expires.
+	if want := start.Add(8*time.Hour + time.Minute + 8*time.Hour - refreshMargin); !clk.now.Equal(want) {
+		t.Fatalf("clock at %s, want %s", clk.now, want)
+	}
+	raw, err := session.ReadFile("gh/hosts.yml")
+	if err != nil || !strings.Contains(string(raw), `"ghu_6"`) {
+		t.Fatalf("hosts.yml: %s %v", raw, err)
+	}
+	if secret, _ := session.ReadFile("secrets/github:github.com"); string(secret) != "ghu_6" {
+		t.Fatalf("secret %q", secret)
 	}
 }
