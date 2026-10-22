@@ -80,12 +80,16 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	}
 	// Inside a session, `run` shares it: the configuration may be out of the
 	// sandbox's reach, and the session already has its credentials.
+	// Nested returns only when it cannot run the command.
 	if rest[0] == "run" && os.Getenv("GEAS_SESSION_DIR") != "" {
-		return 1, session.Nested(harness(rest[1:]))
+		return session.ExitNotStarted, session.Nested(harness(rest[1:]))
 	}
 	timer := timing.New(os.Getenv("GEAS_DEBUG"), os.Stderr)
 	settings, err := config.Load(*path)
 	timer.Step("config load")
+	if err != nil && rest[0] == "run" {
+		return session.ExitNotStarted, err
+	}
 	if err != nil {
 		return 1, err
 	}

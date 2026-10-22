@@ -301,3 +301,29 @@ func TestKeepFreshMarksAnExpiredCredential(t *testing.T) {
 		t.Fatalf("secret %q", secret)
 	}
 }
+
+// A reaper that cannot start stops the session before the harness, with
+// ExitNotStarted, and leaves no session directory behind.
+func TestRunWithoutAReaper(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	before := launchReaper
+	launchReaper = func(string, string, string) (*os.File, error) {
+		return nil, errors.New("cannot start the revocation reaper")
+	}
+	t.Cleanup(func() { launchReaper = before })
+	c := testutil.Config()
+	c.GitLab.Enabled = testutil.Bool(false)
+	c.GitHub.StateFile = filepath.Join(t.TempDir(), "github.json")
+	ran := filepath.Join(t.TempDir(), "ran")
+	code, err := Run(context.Background(), c, []string{"/bin/sh", "-c", "touch " + shellQuote(ran)}, nil, new(bytes.Buffer), nil)
+	if code != ExitNotStarted || err == nil || err.Error() != "cannot start the revocation reaper" {
+		t.Fatalf("%d %v", code, err)
+	}
+	if _, err = os.Stat(ran); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the harness ran: %v", err)
+	}
+	if left, _ := os.ReadDir(filepath.Join(state, "geas", "sessions")); len(left) != 0 {
+		t.Fatalf("session directories left: %v", left)
+	}
+}

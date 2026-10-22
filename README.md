@@ -255,7 +255,7 @@ resolution or PAT creation. The harness has started by then; the provider's
 marker records the reason (see "Session start"), and nothing is printed.
 Fix the login (`geas github-login`, `glab auth login` or
 `geas save-gitlab-issuer`) and start a new session. Configuration errors still
-stop the session before the harness starts.
+stop the session before the harness starts, with exit code 125.
 
 Every provider now behaves as `optional: true` did: the `optional` field is
 still accepted, and has no effect.
@@ -350,6 +350,29 @@ time since the harness started, follow once the harness has exited.
 When the harness exits during a GitLab mint, the launcher waits for the mint's
 answer, within glab's or the API's timeout, and revokes the PAT: a mint, once
 sent, is never cut short.
+
+### Exit codes
+
+| Code    | When                                                                                        |
+| :------ | :------------------------------------------------------------------------------------------ |
+| any     | the harness's own exit code, unchanged, once it has started                                 |
+| 125     | geas failed before the harness started; the error is on stderr                              |
+| 128 + n | the harness was killed by signal n                                                          |
+| 130     | Ctrl-C, SIGTERM or SIGHUP interrupted the session; geas stopped the harness's process group |
+| 124     | the session time limit was reached; geas stopped the harness's process group                |
+| 2       | the command line is wrong, before geas knows the command is `run`                           |
+
+125 covers everything geas does before the harness: a missing or invalid
+configuration, a session directory or a reaper it cannot create, a harness
+command it cannot start, and, inside a session, a nested `geas run` whose
+`GEAS_SESSION_DIR` is unusable. A launcher around geas tells from it that the
+harness never ran. A harness that itself exits 125 is passed through as it is.
+Outside `geas run`, a configuration error exits 1.
+
+geas prints nothing between the harness's start and its exit. Afterwards it
+may print the revocation's result, a revocation the reaper retries, the reason
+the session stopped the harness, and, with `GEAS_DEBUG=timing`, the
+providers' steps.
 
 ### The session directory
 

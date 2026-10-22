@@ -582,7 +582,65 @@ func TestNestedRunSharesTheSession(t *testing.T) {
 	launcher = exec.Command(os.Args[0])
 	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "GEAS_SESSION_DIR="+filepath.Join(t.TempDir(), "20261022T213405Z-0011223344556677"))
 	output, _ = launcher.CombinedOutput()
-	if code := launcher.ProcessState.ExitCode(); code != 1 || !strings.Contains(string(output), "unset GEAS_SESSION_DIR to start a new session") {
+	if code := launcher.ProcessState.ExitCode(); code != 125 || !strings.Contains(string(output), "unset GEAS_SESSION_DIR to start a new session") {
 		t.Fatalf("stale session: exit %d: %s", code, output)
+	}
+}
+
+// runGeas runs the launcher to its end with args, in a state directory of
+// its own unless env names one, and returns its output and exit code.
+func runGeas(t *testing.T, args []string, env ...string) (string, int) {
+	t.Helper()
+	raw, _ := json.Marshal(args)
+	launcher := exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(raw), "XDG_STATE_HOME="+t.TempDir())
+	launcher.Env = append(launcher.Env, env...)
+	output, err := launcher.CombinedOutput()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatal(err)
+	}
+	return string(output), launcher.ProcessState.ExitCode()
+}
+
+// geas run exits 125, with the error and nothing else, when it fails before
+// the harness starts; once the harness has started, its exit code is the
+// harness's, 125 included, and geas prints nothing of its own.
+func TestExitCodes(t *testing.T) {
+	dir := t.TempDir()
+	// GitHub alone, with no login: it fails in the background, offline.
+	c := testutil.Config()
+	c.SessionHours = 1
+	c.GitLab.Enabled = testutil.Bool(false)
+	c.GitHub.StateFile = filepath.Join(dir, "github.json")
+	raw, _ := json.Marshal(c)
+	good := filepath.Join(dir, "config.json")
+	invalid := filepath.Join(dir, "invalid.json")
+	if os.WriteFile(good, raw, 0600) != nil || os.WriteFile(invalid, []byte(`{"session_hours": 1, "unknown": true}`), 0600) != nil {
+		t.Fatal("cannot write the configurations")
+	}
+	notADirectory := filepath.Join(dir, "state-file")
+	os.WriteFile(notADirectory, nil, 0600)
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		env    []string
+		code   int
+		output string
+	}{
+		{"no configuration", []string{"--config", filepath.Join(dir, "missing.json"), "run", "--", "true"}, nil, 125, "geas: cannot read configuration\n"},
+		{"invalid configuration", []string{"--config", invalid, "run", "--", "true"}, nil, 125, "geas: invalid configuration JSON\n"},
+		{"no harness", []string{"--config", good, "run", "--"}, nil, 125, "geas: specify a harness command after run --\n"},
+		{"no session directory", []string{"--config", good, "run", "--", "true"}, []string{"XDG_STATE_HOME=" + notADirectory}, 125, "geas: local file or permission error\n"},
+		{"harness not found", []string{"--config", good, "run", "--", filepath.Join(dir, "no-such-harness")}, nil, 125, "geas: cannot start harness; check executable and arguments\n"},
+		{"harness exit code", []string{"--config", good, "run", "--", "/bin/sh", "-c", "echo harness; exit 42"}, nil, 42, "harness\n"},
+		{"harness exits 125", []string{"--config", good, "run", "--", "/bin/sh", "-c", "exit 125"}, nil, 125, ""},
+		// Outside run, a configuration error is still 1.
+		{"github-login", []string{"--config", invalid, "github-login"}, nil, 1, "geas: invalid configuration JSON\n"},
+	} {
+		output, code := runGeas(t, tc.args, tc.env...)
+		if code != tc.code || output != tc.output {
+			t.Errorf("%s: exit %d, output %q; want %d, %q", tc.name, code, output, tc.code, tc.output)
+		}
 	}
 }

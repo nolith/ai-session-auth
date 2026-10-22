@@ -103,7 +103,7 @@ func (h *harness) await(ctx context.Context, duration time.Duration) (int, error
 func runHarness(ctx context.Context, args, environment []string, duration time.Duration) (int, error) {
 	h, err := startHarness(args, environment)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	return h.await(ctx, duration)
 }
@@ -254,59 +254,70 @@ func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers 
 	return providers, failed
 }
 
+// ExitNotStarted is geas run's exit code when it fails before the harness
+// starts: a configuration error, a session directory or a reaper it cannot
+// create, a harness it cannot start. The error is printed; a launcher
+// around geas can tell this from a harness that started and failed.
+const ExitNotStarted = 125
+
+// launchReaper starts the reaper; the tests replace it with one that fails.
+var launchReaper = startReaper
+
 // Run runs one session around args. It plans the session without a network
 // call, starts the reaper, then the harness, and only then acquires the
 // providers' credentials, in parallel, in the background: the harness never
 // waits for the network. A provider that fails is marked failed and never
-// stops the session; nothing prints while the harness runs. The exit code
-// is the harness's, and what the session minted is revoked on the way out.
+// stops the session; nothing prints while the harness runs. Before the
+// harness starts, a failure returns ExitNotStarted; after, the exit code is
+// the harness's, unchanged, or 130 and 124 when the session interrupted it
+// or ran out of time. What the session minted is revoked on the way out.
 func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
-		return 1, errors.New("specify a harness command after run --")
+		return ExitNotStarted, errors.New("specify a harness command after run --")
 	}
 	binary, err := executablePath()
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	providers, failed := plan(settings, api, timer)
 	id, err := sessiondir.NewID(time.Now())
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	// The configuration's errors first: nothing exists yet to clean up.
 	path, err := sessiondir.Path(id)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	exported, err := providerEnv(providers, path)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	hosts, err := credhelper.Hosts(providers)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	dir, err := sessiondir.Create(id)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	book, err := ledger.Create(dir)
 	if err != nil {
 		dir.Remove()
-		return 1, err
+		return ExitNotStarted, err
 	}
 	if err = writeGitConfig(dir, binary, hosts); err != nil {
 		dir.Remove()
-		return 1, err
+		return ExitNotStarted, err
 	}
 	if err = writeSandbox(dir, providers); err != nil {
 		dir.Remove()
-		return 1, err
+		return ExitNotStarted, err
 	}
 	environment, err := sessionEnvironment(os.Environ(), dir, exported)
 	if err != nil {
 		dir.Remove()
-		return 1, err
+		return ExitNotStarted, err
 	}
 	// Every provider has a marker before the harness can look for one.
 	for _, p := range providers {
@@ -316,7 +327,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		}
 		if err = mark(dir, p.ID(), state, why); err != nil {
 			dir.Remove()
-			return 1, err
+			return ExitNotStarted, err
 		}
 	}
 	timer.Step("plan")
@@ -327,14 +338,14 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	// Before any credential exists: whatever the ledger will list, and the
 	// directory the credentials land in, the reaper cleans up if the launcher
 	// cannot.
-	if reaper, err = startReaper(binary, settings.Source(), id); err != nil {
-		return 1, err
+	if reaper, err = launchReaper(binary, settings.Source(), id); err != nil {
+		return ExitNotStarted, err
 	}
 	timer.Step("reaper")
 	timer.HarnessStart()
 	h, err := startHarness(args, environment)
 	if err != nil {
-		return 1, err
+		return ExitNotStarted, err
 	}
 	// Stopped, and waited for, before teardown revokes what they minted and
 	// removes the directory they write into.
