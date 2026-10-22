@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"context"
@@ -69,9 +69,9 @@ func startReaper(binary, configPath string, pat gitlab.PAT) (*os.File, error) {
 	return write, nil
 }
 
-// runReaper serves `_reaper detach` and `_reaper watch`. SIGHUP, SIGINT and
+// RunReaper serves `_reaper detach` and `_reaper watch`. SIGHUP, SIGINT and
 // SIGTERM never stop a revocation; ctx only cuts the pauses between attempts.
-func runReaper(ctx context.Context, args []string) error {
+func RunReaper(ctx context.Context, args []string) error {
 	if len(args) != 4 {
 		return errors.New("invalid reaper invocation")
 	}

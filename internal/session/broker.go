@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"bufio"
@@ -17,20 +17,20 @@ import (
 	"github.com/nolith/geas/internal/config"
 )
 
-type BrokerRequest struct {
+type brokerRequest struct {
 	Service  string `json:"service"`
 	Protocol string `json:"protocol,omitempty"`
 	Host     string `json:"host,omitempty"`
 	Path     string `json:"path,omitempty"`
 }
-type BrokerResponse struct {
+type brokerResponse struct {
 	Token    string `json:"token,omitempty"`
 	Username string `json:"username,omitempty"`
 	Error    string `json:"error,omitempty"`
 	// Quit tells Git to stop asking other helpers and the user.
 	Quit bool `json:"quit,omitempty"`
 }
-type Broker struct {
+type broker struct {
 	mu          sync.RWMutex
 	Config      config.Config
 	GitHubToken func(context.Context) (string, error)
@@ -50,14 +50,14 @@ func (e unavailableError) Error() string {
 	return e.provider + " is not available in this session: " + e.reason
 }
 
-func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerResponse, error) {
+func (b *broker) answer(ctx context.Context, request brokerRequest) (brokerResponse, error) {
 	if !b.Now().Before(b.Deadline) {
-		return BrokerResponse{}, errors.New("session expired")
+		return brokerResponse{}, errors.New("session expired")
 	}
 	service := request.Service
 	if service == "git" {
 		if request.Protocol != "https" {
-			return BrokerResponse{}, nil
+			return brokerResponse{}, nil
 		}
 		switch request.Host {
 		case "github.com":
@@ -65,11 +65,11 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 		case "gitlab.com":
 			service = "gitlab"
 		default:
-			return BrokerResponse{}, nil
+			return brokerResponse{}, nil
 		}
 		path, ok := config.NormalizeGitPath(request.Path)
 		if !ok {
-			return BrokerResponse{}, nil
+			return brokerResponse{}, nil
 		}
 		var permitted bool
 		if service == "github" {
@@ -78,32 +78,32 @@ func (b *Broker) answer(ctx context.Context, request BrokerRequest) (BrokerRespo
 			permitted = gitlabAllowed(b.Config.GitLab, path)
 		}
 		if !permitted {
-			return BrokerResponse{}, nil
+			return brokerResponse{}, nil
 		}
 	}
 	switch service {
 	case "github":
 		if b.GitHubSkipped != "" {
-			return BrokerResponse{}, unavailableError{"GitHub", b.GitHubSkipped}
+			return brokerResponse{}, unavailableError{"GitHub", b.GitHubSkipped}
 		}
 		if b.GitHubToken != nil {
 			token, err := b.GitHubToken(ctx)
 			if err != nil {
-				return BrokerResponse{}, err
+				return brokerResponse{}, err
 			}
-			return BrokerResponse{Token: token, Username: "x-access-token"}, nil
+			return brokerResponse{Token: token, Username: "x-access-token"}, nil
 		}
 	case "gitlab":
 		b.mu.RLock()
 		defer b.mu.RUnlock()
 		if b.GitLabSkipped != "" {
-			return BrokerResponse{}, unavailableError{"GitLab", b.GitLabSkipped}
+			return brokerResponse{}, unavailableError{"GitLab", b.GitLabSkipped}
 		}
 		if b.GitLabToken != "" {
-			return BrokerResponse{Token: b.GitLabToken, Username: "oauth2"}, nil
+			return brokerResponse{Token: b.GitLabToken, Username: "oauth2"}, nil
 		}
 	}
-	return BrokerResponse{}, errors.New("service not enabled")
+	return brokerResponse{}, errors.New("service not enabled")
 }
 
 // githubAllowed reports whether a Git path is an allowed repository or inside
@@ -134,15 +134,15 @@ func gitlabAllowed(c config.GitLabConfig, path string) bool {
 	return slices.ContainsFunc(namespaces, func(namespace string) bool { return strings.HasPrefix(path, namespace+"/") })
 }
 
-type BrokerServer struct {
+type brokerServer struct {
 	listener net.Listener
-	broker   *Broker
+	broker   *broker
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
 
-func startBroker(parent context.Context, address string, broker *Broker) (*BrokerServer, error) {
+func startBroker(parent context.Context, address string, broker *broker) (*brokerServer, error) {
 	listener, err := net.Listen("unix", address)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create session UNIX socket: %w", err)
@@ -152,12 +152,12 @@ func startBroker(parent context.Context, address string, broker *Broker) (*Broke
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	server := &BrokerServer{listener: listener, broker: broker, ctx: ctx, cancel: cancel}
+	server := &brokerServer{listener: listener, broker: broker, ctx: ctx, cancel: cancel}
 	server.wg.Add(1)
 	go server.serve()
 	return server, nil
 }
-func (s *BrokerServer) serve() {
+func (s *brokerServer) serve() {
 	defer s.wg.Done()
 	capacity := make(chan struct{}, 32)
 	for {
@@ -179,13 +179,13 @@ func (s *BrokerServer) serve() {
 			// A request may need a network refresh; slow request input is limited separately.
 			connection.SetReadDeadline(time.Now().Add(10 * time.Second))
 			line, err := bufio.NewReader(io.LimitReader(connection, 8192)).ReadBytes('\n')
-			response := BrokerResponse{Error: "invalid broker request"}
-			var request BrokerRequest
+			response := brokerResponse{Error: "invalid broker request"}
+			var request brokerRequest
 			if err == nil && json.Unmarshal(line, &request) == nil {
 				connection.SetWriteDeadline(time.Now().Add(60 * time.Second))
 				value, err := s.broker.answer(s.ctx, request)
 				if err != nil {
-					response = BrokerResponse{Error: err.Error(), Quit: errors.As(err, new(unavailableError))}
+					response = brokerResponse{Error: err.Error(), Quit: errors.As(err, new(unavailableError))}
 				} else {
 					response = value
 				}
@@ -194,9 +194,9 @@ func (s *BrokerServer) serve() {
 		}()
 	}
 }
-func (s *BrokerServer) close() { s.cancel(); s.listener.Close(); s.wg.Wait() }
-func rpc(request BrokerRequest) (BrokerResponse, error) {
-	var response BrokerResponse
+func (s *brokerServer) close() { s.cancel(); s.listener.Close(); s.wg.Wait() }
+func rpc(request brokerRequest) (brokerResponse, error) {
+	var response brokerResponse
 	address := os.Getenv("GEAS_SOCKET")
 	if address == "" {
 		return response, errors.New("no active authentication session")

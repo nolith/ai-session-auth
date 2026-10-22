@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"bufio"
@@ -125,7 +125,11 @@ func pathWithout(value, dir string) string {
 	}
 	return strings.Join(kept, string(os.PathListSeparator))
 }
-func proxyCLI(service, executable string, args []string) error {
+
+// ProxyCLI execs the real gh or glab with a session token in its environment.
+// A session's wrapper calls it as `geas _proxy`, and it is going away with the
+// wrappers themselves.
+func ProxyCLI(service, executable string, args []string) error {
 	cli := map[string]string{"github": "gh", "gitlab": "glab"}[service]
 	if cli == "" {
 		return errors.New("invalid provider")
@@ -133,7 +137,7 @@ func proxyCLI(service, executable string, args []string) error {
 	if os.Getenv(proxyMark) == service {
 		return fmt.Errorf("%s wrapper loop: %s leads back to the session wrapper; check PATH shims for %s, such as mise", cli, executable, cli)
 	}
-	response, err := rpc(BrokerRequest{Service: service})
+	response, err := rpc(brokerRequest{Service: service})
 	if err != nil {
 		return err
 	}
@@ -152,7 +156,13 @@ func proxyCLI(service, executable string, args []string) error {
 	environment["PATH"] = pathWithout(environment["PATH"], filepath.Join(filepath.Dir(os.Getenv("GEAS_SOCKET")), "bin"))
 	return syscall.Exec(executable, append([]string{executable}, args...), procenv.List(environment))
 }
-func credentialWith(operation string, input io.Reader, output io.Writer, request func(BrokerRequest) (BrokerResponse, error)) error {
+
+// Credential answers one Git credential request, as `geas _credential` runs
+// it, with the session broker the only source of answers.
+func Credential(operation string, input io.Reader, output io.Writer) error {
+	return credentialWith(operation, input, output, rpc)
+}
+func credentialWith(operation string, input io.Reader, output io.Writer, request func(brokerRequest) (brokerResponse, error)) error {
 	if operation != "get" {
 		return nil
 	}
@@ -171,7 +181,7 @@ func credentialWith(operation string, input io.Reader, output io.Writer, request
 	if err := scanner.Err(); err != nil {
 		return errors.New("invalid Git credential request")
 	}
-	response, err := request(BrokerRequest{Service: "git", Protocol: values["protocol"], Host: values["host"], Path: values["path"]})
+	response, err := request(brokerRequest{Service: "git", Protocol: values["protocol"], Host: values["host"], Path: values["path"]})
 	if response.Quit {
 		// Git then fails at once, with no askpass or terminal prompt.
 		fmt.Fprint(output, "quit=1\n\n")

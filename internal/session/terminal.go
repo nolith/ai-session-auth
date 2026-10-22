@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"bufio"
@@ -28,7 +28,10 @@ func setTerminalProcessGroup(fd, group int) error {
 	value := int32(group)
 	return ioctl(fd, syscall.TIOCSPGRP, unsafe.Pointer(&value))
 }
-func readIssuer(ctx context.Context, input *os.File, output io.Writer, fromStdin bool) (string, error) {
+
+// ReadIssuer reads the GitLab issuer PAT, hiding it from the terminal when it
+// is typed rather than piped in.
+func ReadIssuer(ctx context.Context, input *os.File, output io.Writer, fromStdin bool) (string, error) {
 	if !fromStdin {
 		state, err := getTerminalState(int(input.Fd()))
 		if err != nil {

@@ -1,0 +1,331 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/testutil"
+)
+
+// shellQuote quotes a word for /bin/sh, for the harness scripts these tests
+// write into a session.
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+// TestMain lets a test re-execute this binary as the launcher itself, with
+// main's own signal handling, by passing its arguments as JSON. The launcher
+// re-executes it too, as "_reaper" or "_proxy".
+func TestMain(m *testing.M) {
+	if raw, ok := os.LookupEnv("GEAS_TEST_ARGS"); ok {
+		os.Unsetenv("GEAS_TEST_ARGS")
+		var args []string
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			os.Exit(2)
+		}
+		os.Args = append([]string{"geas"}, args...)
+		main()
+	}
+	// The launcher's own re-executions: the reaper, and gh/glab through _proxy.
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "_") {
+		main()
+	}
+	os.Exit(m.Run())
+}
+
+type testSession struct {
+	launcher *exec.Cmd
+	done     chan error
+	output   *os.File // read end of the launcher's stdout and stderr
+	glab     string   // fake glab directory and call log
+	state    string   // XDG_STATE_HOME: glab.lock and reaper.log
+}
+
+// startSession runs the launcher with a fake glab issuer around the harness
+// script, which runs under /bin/sh, and returns once the harness has started.
+func startSession(t *testing.T, script string) *testSession {
+	t.Helper()
+	s := &testSession{glab: testutil.FakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
+	dir := t.TempDir()
+	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: testutil.Bool(false)}, GitLab: testutil.GlabConfig()}
+	raw, _ := json.Marshal(c)
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(dir, "harness.pid")
+	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", "echo $$ >" + shellQuote(started) + "; " + script})
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.output = read
+	s.launcher = exec.Command(os.Args[0])
+	s.launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
+	s.launcher.Stdout, s.launcher.Stderr = write, write
+	if err = s.launcher.Start(); err != nil {
+		t.Fatal(err)
+	}
+	write.Close()
+	exited := make(chan error, 1)
+	go func() { exited <- s.launcher.Wait() }()
+	// Wait for the reaper too, so that the temporary directories outlive it.
+	t.Cleanup(func() { waitReaper(t, s) })
+	deadline := time.After(20 * time.Second)
+	for {
+		if raw, err := os.ReadFile(started); err == nil && strings.HasSuffix(string(raw), "\n") {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				// Only matters if nothing else stops it.
+				t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+			}
+			go func() { s.done <- <-exited }()
+			return s
+		}
+		select {
+		case err := <-exited:
+			// A harness that exits at once may finish before it is seen.
+			if raw, _ := os.ReadFile(started); len(raw) > 0 {
+				s.done <- err
+				return s
+			}
+			output, _ := io.ReadAll(read)
+			if strings.Contains(string(output), "UNIX socket") {
+				t.Skip("runtime prohibits UNIX sockets")
+			}
+			t.Fatalf("launcher exited before the harness started: %v %s", err, output)
+		case <-deadline:
+			s.launcher.Process.Kill()
+			t.Fatal("harness did not start")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+func (s *testSession) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(20 * time.Second):
+		s.launcher.Process.Kill()
+		t.Fatal("launcher did not stop")
+	}
+}
+
+// reaperPID finds this session's reaper by the PAT name on its command line.
+func reaperPID(t *testing.T, s *testSession) int {
+	t.Helper()
+	name, err := os.ReadFile(filepath.Join(s.glab, "name"))
+	if err != nil || len(name) == 0 {
+		return 0
+	}
+	output, err := exec.Command("ps", "-A", "-o", "pid=,args=").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, "_reaper watch ") && strings.Contains(line, string(name)) {
+			pid, _ := strconv.Atoi(strings.Fields(line)[0])
+			return pid
+		}
+	}
+	return 0
+}
+func waitReaper(t *testing.T, s *testSession) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); reaperPID(t, s) != 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			syscall.Kill(reaperPID(t, s), syscall.SIGKILL)
+			t.Fatal("reaper still running")
+		}
+	}
+}
+func deletes(t *testing.T, s *testSession) (count int, checked bool) {
+	t.Helper()
+	for _, call := range testutil.Calls(t, s.glab) {
+		switch {
+		case slices.Equal(call[3:], []string{"--method", "DELETE", "personal_access_tokens/42"}):
+			count++
+		case slices.Equal(call[3:], []string{"--method", "GET", "personal_access_tokens/42"}):
+			checked = true
+		}
+	}
+	return count, checked
+}
+
+// A closed terminal or pane takes the launcher's output with it, then sends
+// SIGHUP: the harness must still be stopped and the session PAT revoked.
+func TestHangupStopsHarnessAndRevokes(t *testing.T) {
+	s := startSession(t, "exec sleep 30")
+	s.output.Close()
+	if err := s.launcher.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	s.wait(t)
+	// 130 is a handled interruption; a launcher killed by SIGHUP or SIGPIPE
+	// reports -1.
+	if code := s.launcher.ProcessState.ExitCode(); code != 130 {
+		t.Fatalf("exit %d", code)
+	}
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+}
+
+// The launcher revokes on a clean exit and tells the reaper, which does nothing.
+func TestCleanExitRevokesOnce(t *testing.T) {
+	s := startSession(t, "exit 0")
+	io.Copy(io.Discard, s.output)
+	s.wait(t)
+	if code := s.launcher.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+	if _, err := os.Stat(filepath.Join(s.state, "geas", "reaper.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reaper logged on a clean exit: %v", err)
+	}
+}
+
+// SIGKILL, as from a herdr pane that closes, leaves no chance to revoke: the
+// reaper, outside the launcher's session and process tree, must do it.
+func TestKilledLauncherIsReaped(t *testing.T) {
+	s := startSession(t, "exec sleep 30")
+	var reaper int
+	for deadline := time.Now().Add(10 * time.Second); reaper == 0; time.Sleep(20 * time.Millisecond) {
+		if reaper = reaperPID(t, s); reaper == 0 && time.Now().After(deadline) {
+			t.Fatal("no reaper")
+		}
+	}
+	launcher := s.launcher.Process.Pid
+	reaperSession, _ := getsid(reaper)
+	launcherSession, _ := getsid(launcher)
+	reaperGroup, _ := syscall.Getpgid(reaper)
+	parent, _ := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(reaper)).Output()
+	if reaperSession == launcherSession || reaperGroup == syscall.Getpgrp() || strings.TrimSpace(string(parent)) == strconv.Itoa(launcher) {
+		t.Fatalf("reaper not detached: session %d (launcher %d), group %d, parent %s", reaperSession, launcherSession, reaperGroup, parent)
+	}
+	if err := s.launcher.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	s.wait(t)
+	// The harness survives SIGKILL of the launcher; holding no end of the
+	// reaper's pipe, it cannot delay the revocation either.
+	waitReaper(t, s)
+	if count, checked := deletes(t, s); count != 1 || !checked {
+		t.Fatalf("%d DELETE calls, reaper checked: %v", count, checked)
+	}
+	log, err := os.ReadFile(filepath.Join(s.state, "geas", "reaper.log"))
+	if err != nil || !strings.Contains(string(log), "launcher gone without revoking; revoked") {
+		t.Fatalf("reaper log: %q %v", log, err)
+	}
+}
+
+// optionalSession runs the launcher to its end with a GitHub login never made
+// and a glab issuer that fails, each optional as given, and returns its output,
+// its exit code and the fake glab's directory. The gh beside that glab only
+// records that it ran.
+func optionalSession(t *testing.T, github, gitlab bool, script string) (string, int, string) {
+	t.Helper()
+	fakes := testutil.FakeGlab(t)
+	gh := "#!/bin/sh\ntouch " + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
+	if err := os.WriteFile(filepath.Join(fakes, "gh"), []byte(gh), 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	c := testutil.Config()
+	c.SessionHours = 1
+	c.GitHub.StateFile = filepath.Join(dir, "github.json")
+	c.GitHub.Optional = github
+	c.GitLab = testutil.GlabConfig()
+	c.GitLab.Optional = gitlab
+	raw, _ := json.Marshal(c)
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", script})
+	launcher := exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
+	output, err := launcher.CombinedOutput()
+	if strings.Contains(string(output), "UNIX socket") {
+		t.Skip("runtime prohibits UNIX sockets")
+	}
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatal(err)
+	}
+	return string(output), launcher.ProcessState.ExitCode(), fakes
+}
+
+// With every provider optional and failing, the harness still starts, and the
+// wrappers and Git refuse instead of reaching the real CLIs or a prompt.
+func TestOptionalProvidersAreSkipped(t *testing.T) {
+	script := `gh api user; echo "gh exit $?"; glab api user; echo "glab exit $?"
+if command -v git >/dev/null; then
+	printf 'protocol=https\nhost=gitlab.com\npath=group/project.git\n\n' | git credential fill
+fi
+echo harness done`
+	output, code, fakes := optionalSession(t, true, true, script)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, output)
+	}
+	for _, want := range []string{
+		"WARNING: GitHub is not available in this session: run github-login before starting a session. Fix: geas github-login\n",
+		"WARNING: GitLab is not available in this session: glab issuer request failed. Fix: glab auth login\n",
+		"Session ready without credentials",
+		"geas: GitHub is not available in this session: run github-login before starting a session\ngh exit 1\n",
+		"geas: GitLab is not available in this session: glab issuer request failed\nglab exit 1\n",
+		"harness done\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output lacks %q:\n%s", want, output)
+		}
+	}
+	if _, err := exec.LookPath("git"); err == nil && !strings.Contains(output, "told us to quit") {
+		t.Errorf("Git did not stop at the helper:\n%s", output)
+	}
+	if strings.Contains(output, "glab-secret") {
+		t.Errorf("issuer output leaked:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(fakes, "gh-called")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the gh wrapper reached the real gh")
+	}
+	// The issuer's lookup, and nothing after it: no PAT, so no reaper and no
+	// revocation; the glab wrapper never reached the real glab. The lookup
+	// document itself is pinned in internal/provider/gitlab.
+	calls := testutil.Calls(t, fakes)
+	if len(calls) != 1 || len(calls[0]) != 6 || calls[0][3] != "graphql" || !strings.HasPrefix(calls[0][5], "query=query SessionLookup") {
+		t.Errorf("glab calls: %q", calls)
+	}
+}
+
+// A required provider that fails stops the session before the harness.
+func TestRequiredProviderFailureStopsSession(t *testing.T) {
+	for _, tc := range []struct {
+		github, gitlab bool
+		want           string
+		glabCalls      int
+	}{
+		{false, true, "geas: run github-login before starting a session\n", 0},
+		{true, false, "geas: glab issuer request failed\n", 1},
+	} {
+		output, code, fakes := optionalSession(t, tc.github, tc.gitlab, "echo harness started")
+		if code != 1 || !strings.HasSuffix(output, tc.want) || strings.Contains(output, "harness started") {
+			t.Errorf("optional GitHub %v, GitLab %v: exit %d:\n%s", tc.github, tc.gitlab, code, output)
+		}
+		if calls := testutil.Calls(t, fakes); len(calls) != tc.glabCalls {
+			t.Errorf("optional GitHub %v, GitLab %v: glab calls: %q", tc.github, tc.gitlab, calls)
+		}
+	}
+}

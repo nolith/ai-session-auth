@@ -1,4 +1,8 @@
-package main
+// Package session runs one session: it starts the revocation reaper, resolves
+// the credentials the harness needs, hands it an environment that reads them,
+// and revokes them when it exits. The broker and the CLI wrappers it still
+// carries are temporary.
+package session
 
 import (
 	"context"
@@ -124,7 +128,10 @@ func skip(output io.Writer, provider, reason, fix string) {
 	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
 }
 
-func runSession(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
+// Run runs one session around args: it resolves the providers' credentials,
+// starts the harness, and revokes what it minted on the way out. The exit code
+// it returns is the harness's.
+func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
 	}
@@ -211,12 +218,12 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 			fmt.Fprintln(output, "GitLab session PAT revoked.")
 		}()
 	}
-	broker := &Broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
+	sessionBroker := &broker{Config: settings, Deadline: time.Now().Add(settings.Duration()), Now: time.Now, GitHubSkipped: githubSkipped, GitLabSkipped: gitlabSkipped}
 	if gh != nil {
-		broker.GitHubToken = gh.Token
+		sessionBroker.GitHubToken = gh.Token
 	}
 	// Bind before creating a PAT: failure to create a socket must not mint a token.
-	server, err := startBroker(ctx, address, broker)
+	server, err := startBroker(ctx, address, sessionBroker)
 	if err != nil {
 		return 1, err
 	}
@@ -229,10 +236,10 @@ func runSession(ctx context.Context, settings config.Config, args []string, api 
 		if err != nil && len(gl.Created) == 0 {
 			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
 		}
-		broker.mu.Lock()
-		broker.GitLabToken = token
-		broker.GitLabSkipped = gitlabSkipped
-		broker.mu.Unlock()
+		sessionBroker.mu.Lock()
+		sessionBroker.GitLabToken = token
+		sessionBroker.GitLabSkipped = gitlabSkipped
+		sessionBroker.mu.Unlock()
 		if err != nil && gitlabSkipped == "" {
 			return 1, err
 		}

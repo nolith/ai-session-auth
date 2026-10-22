@@ -14,6 +14,7 @@ import (
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/secretfile"
+	"github.com/nolith/geas/internal/session"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -32,17 +33,17 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		if len(args) < 3 {
 			return 1, errors.New("invalid proxy invocation")
 		}
-		return 1, proxyCLI(args[1], args[2], args[3:])
+		return 1, session.ProxyCLI(args[1], args[2], args[3:])
 	}
 	if len(args) > 0 && args[0] == "_reaper" {
-		return 0, runReaper(ctx, args[1:])
+		return 0, session.RunReaper(ctx, args[1:])
 	}
 	if len(args) > 0 && args[0] == "_credential" {
 		operation := "get"
 		if len(args) > 1 {
 			operation = args[1]
 		}
-		return 0, credentialWith(operation, os.Stdin, os.Stdout, rpc)
+		return 0, session.Credential(operation, os.Stdin, os.Stdout)
 	}
 	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -82,7 +83,7 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		if len(rest) > 1 && !fromStdin {
 			return 2, errors.New("only --stdin is supported for save-gitlab-issuer")
 		}
-		token, err := readIssuer(ctx, os.Stdin, os.Stderr, fromStdin)
+		token, err := session.ReadIssuer(ctx, os.Stdin, os.Stderr, fromStdin)
 		if err != nil {
 			return 1, err
 		}
@@ -96,7 +97,7 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		if len(command) > 0 && command[0] == "--" {
 			command = command[1:]
 		}
-		return runSession(ctx, settings, command, api, os.Stderr, timer)
+		return session.Run(ctx, settings, command, api, os.Stderr, timer)
 	default:
 		return 2, errors.New("unknown command")
 	}
