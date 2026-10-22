@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -173,17 +174,15 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	if err := validateGitLabAllowlist(g.Config); err != nil {
 		return "", err
 	}
-	var user struct {
-		Username string `json:"username"`
-	}
-	if err := g.Issuer.rest(ctx, http.MethodGet, "user", &user); err != nil {
+	resolved, err := g.lookup(ctx)
+	g.Steps.step("GitLab issuer lookup")
+	if err != nil {
 		return "", err
 	}
-	if user.Username == "" || user.Username != g.Config.ExpectedUser {
+	if resolved.user == "" || resolved.user != g.Config.ExpectedUser {
 		return "", errors.New("GitLab issuer user does not match expected_user")
 	}
-	scopes, err := g.scopes(ctx)
-	g.Steps.step("GitLab issuer lookup")
+	scopes, err := g.scopes(resolved)
 	if err != nil {
 		return "", err
 	}
@@ -223,21 +222,177 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	return result.Data.Create.Token, nil
 }
 
-// scopes returns the session PAT's scopes. Groups and projects are resolved by
-// path and refused unless GitLab reports the same path, so a renamed or
-// mistyped namespace stops the session before any PAT exists. The earlier
+// lookup is the issuer lookup's answer: the issuer's user and every namespace
+// the allowlist names, in configuration order.
+type lookup struct {
+	user     string
+	groups   []namespace
+	projects []namespace
+}
+
+// namespace is one group or project resolved by path or ID. id is the GraphQL
+// global ID, which granular scopes use as it is.
+type namespace struct {
+	id       string
+	fullPath string
+}
+
+// lookupDocument builds the one aliased query that replaces the REST user call
+// and the per-namespace lookups: currentUser for the identity check, one
+// group(fullPath:) or project(fullPath:) alias per configured path, and
+// projects(ids:) for the earlier format. GraphQL never embeds a group's
+// projects, so the 6 s REST answer disappears with it.
+//
+// The paths are written into the document as escaped string literals: an alias
+// needs one literal argument each, and the glab issuer carries only objects and
+// arrays in its -F variables, never the scalar a $path variable would need.
+func lookupDocument(c GitLabConfig) string {
+	var b strings.Builder
+	b.WriteString("query SessionLookup {\n  currentUser { username }\n")
+	if !c.namespaced() {
+		ids := make([]string, 0, len(c.ProjectIDs))
+		for _, id := range c.ProjectIDs {
+			ids = append(ids, graphqlString(fmt.Sprintf("gid://gitlab/Project/%d", id)))
+		}
+		fmt.Fprintf(&b, "  l0: projects(ids: [%s]) { nodes { id fullPath } }\n", strings.Join(ids, ", "))
+	}
+	for i, path := range c.Groups {
+		fmt.Fprintf(&b, "  g%d: group(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
+	}
+	for i, path := range c.Projects {
+		fmt.Fprintf(&b, "  p%d: project(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
+// graphqlString writes value as a GraphQL string literal. JSON's escaping is a
+// subset of GraphQL's, and the configuration validates the paths.
+func graphqlString(value string) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
+// parseGlobalID reads the numeric ID out of a GraphQL global ID such as
+// gid://gitlab/Group/9970, and refuses another model's.
+func parseGlobalID(value, model string) (int64, error) {
+	rest, ok := strings.CutPrefix(value, "gid://gitlab/"+model+"/")
+	id, err := strconv.ParseInt(rest, 10, 64)
+	if !ok || err != nil || id <= 0 {
+		return 0, fmt.Errorf("unexpected %s global ID", strings.ToLower(model))
+	}
+	return id, nil
+}
+
+// lookup resolves the user and every configured namespace in one request, and
+// refuses a path that does not resolve, as the REST lookups did. The earlier
+// format resolves its project IDs instead.
+func (g *GitLab) lookup(ctx context.Context) (lookup, error) {
+	var answer struct {
+		Errors []any                      `json:"errors"`
+		Data   map[string]json.RawMessage `json:"data"`
+	}
+	if err := g.Issuer.graphql(ctx, lookupDocument(g.Config), map[string]any{}, &answer); err != nil {
+		return lookup{}, err
+	}
+	if len(answer.Errors) > 0 || answer.Data == nil {
+		return lookup{}, errors.New("GitLab lookup query failed; check the issuer and the allowlist")
+	}
+	var user struct {
+		Username string `json:"username"`
+	}
+	if err := decodeAlias(answer.Data, "currentUser", "issuer user", &user); err != nil {
+		return lookup{}, err
+	}
+	resolved := lookup{user: user.Username}
+	if !g.Config.namespaced() {
+		projects, err := projectNodes(answer.Data)
+		if err != nil {
+			return lookup{}, err
+		}
+		resolved.projects = projects
+		return resolved, nil
+	}
+	for i, path := range g.Config.Groups {
+		node, err := pathNode(answer.Data, fmt.Sprintf("g%d", i), "Group", path)
+		if err != nil {
+			return lookup{}, err
+		}
+		resolved.groups = append(resolved.groups, node)
+	}
+	for i, path := range g.Config.Projects {
+		node, err := pathNode(answer.Data, fmt.Sprintf("p%d", i), "Project", path)
+		if err != nil {
+			return lookup{}, err
+		}
+		resolved.projects = append(resolved.projects, node)
+	}
+	return resolved, nil
+}
+
+// decodeAlias reads one alias of the lookup answer, refusing null: GraphQL
+// answers null for a path that does not resolve.
+func decodeAlias(data map[string]json.RawMessage, alias, what string, out any) error {
+	raw, ok := data[alias]
+	if !ok || string(raw) == "null" {
+		return fmt.Errorf("GitLab %s does not resolve; update the allowlist", what)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return errors.New("GitLab lookup returned an unexpected answer")
+	}
+	return nil
+}
+
+// pathNode resolves one configured group or project and refuses anything but
+// the configured path and a global ID of the expected model.
+func pathNode(data map[string]json.RawMessage, alias, model, path string) (namespace, error) {
+	var node struct {
+		ID       string `json:"id"`
+		FullPath string `json:"fullPath"`
+	}
+	kind := strings.ToLower(model)
+	if err := decodeAlias(data, alias, kind+" "+path, &node); err != nil {
+		return namespace{}, err
+	}
+	if node.FullPath != path {
+		return namespace{}, fmt.Errorf("GitLab %s %s resolves to another path; update the allowlist", kind, path)
+	}
+	if _, err := parseGlobalID(node.ID, model); err != nil {
+		return namespace{}, fmt.Errorf("GitLab %s %s resolves without an ID; update the allowlist", kind, path)
+	}
+	return namespace{id: node.ID, fullPath: node.FullPath}, nil
+}
+
+// projectNodes resolves the earlier format's projects(ids:), one node per ID.
+func projectNodes(data map[string]json.RawMessage) ([]namespace, error) {
+	var answer struct {
+		Nodes []struct {
+			ID       string `json:"id"`
+			FullPath string `json:"fullPath"`
+		} `json:"nodes"`
+	}
+	if err := decodeAlias(data, "l0", "project IDs", &answer); err != nil {
+		return nil, err
+	}
+	projects := make([]namespace, 0, len(answer.Nodes))
+	for _, node := range answer.Nodes {
+		if _, err := parseGlobalID(node.ID, "Project"); err != nil || node.FullPath == "" {
+			return nil, errors.New("GitLab project IDs resolve to an unexpected answer; update the allowlist")
+		}
+		projects = append(projects, namespace{id: node.ID, fullPath: node.FullPath})
+	}
+	return projects, nil
+}
+
+// scopes returns the session PAT's scopes from the resolved namespaces. Groups
+// and projects are refused unless GitLab reported the same path, so a renamed
+// or mistyped namespace stops the session before any PAT exists. The earlier
 // format lists project IDs and scopes itself; only the paths are checked.
-func (g *GitLab) scopes(ctx context.Context) ([]Scope, error) {
+func (g *GitLab) scopes(resolved lookup) ([]Scope, error) {
 	if !g.Config.namespaced() {
 		paths := map[string]bool{}
-		for _, id := range g.Config.ProjectIDs {
-			var project struct {
-				Path string `json:"path_with_namespace"`
-			}
-			if err := g.Issuer.rest(ctx, http.MethodGet, fmt.Sprintf("projects/%d", id), &project); err != nil {
-				return nil, err
-			}
-			paths[project.Path] = true
+		for _, project := range resolved.projects {
+			paths[project.fullPath] = true
 		}
 		if len(paths) != len(g.Config.Repositories) {
 			return nil, errors.New("GitLab project IDs do not match repository allowlist")
@@ -251,29 +406,10 @@ func (g *GitLab) scopes(ctx context.Context) ([]Scope, error) {
 	}
 	allowed := map[string]bool{}
 	var ids []string
-	for _, kind := range []struct {
-		model, endpoint string
-		paths           []string
-	}{{"Group", "groups/", g.Config.Groups}, {"Project", "projects/", g.Config.Projects}} {
-		for _, path := range kind.paths {
-			var resolved struct {
-				ID      int64  `json:"id"`
-				Group   string `json:"full_path"`
-				Project string `json:"path_with_namespace"`
-			}
-			if err := g.Issuer.rest(ctx, http.MethodGet, kind.endpoint+url.PathEscape(path), &resolved); err != nil {
-				return nil, err
-			}
-			reported := resolved.Group
-			if kind.model == "Project" {
-				reported = resolved.Project
-			}
-			if resolved.ID <= 0 || reported != path {
-				return nil, fmt.Errorf("GitLab %s %s resolves to another path; update the allowlist", strings.ToLower(kind.model), path)
-			}
-			id := fmt.Sprintf("gid://gitlab/%s/%d", kind.model, resolved.ID)
-			allowed[id] = true
-			ids = append(ids, id)
+	for _, namespaces := range [][]namespace{resolved.groups, resolved.projects} {
+		for _, node := range namespaces {
+			allowed[node.id] = true
+			ids = append(ids, node.id)
 		}
 	}
 	scopes := namespacedScopes(g.Config, ids)

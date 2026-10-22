@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,62 @@ func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *API {
 	return a
 }
 func boolPointer(v bool) *bool { return &v }
+
+// lookupAlias matches one aliased group or project of the lookup document.
+var lookupAlias = regexp.MustCompile(`(\w+): (group|project)\(fullPath: ("(?:[^"\\]|\\.)*")\)`)
+
+// graphqlPayload decodes a GraphQL request's document and variables.
+func graphqlPayload(t *testing.T, r *http.Request) (string, map[string]json.RawMessage) {
+	t.Helper()
+	var payload struct {
+		Query     string                     `json:"query"`
+		Variables map[string]json.RawMessage `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Query, payload.Variables
+}
+
+// lookupAnswers answers the lookup document as GitLab would: every group or
+// project alias resolves to the node answers holds for its path, and a path
+// with no node resolves to null. The earlier format's projects(ids:) alias
+// resolves to ids instead. The test fails on an alias it did not expect.
+func lookupAnswers(t *testing.T, query, user string, answers map[string]any, ids []any) map[string]any {
+	t.Helper()
+	data := map[string]any{"currentUser": map[string]any{"username": user}}
+	for _, match := range lookupAlias.FindAllStringSubmatch(query, -1) {
+		alias, kind, quoted := match[1], match[2], match[3]
+		var path string
+		if err := json.Unmarshal([]byte(quoted), &path); err != nil {
+			t.Fatalf("alias %s: %v", alias, err)
+		}
+		node, ok := answers[path]
+		if !ok {
+			t.Errorf("the document asks for %s %s, which the test does not answer", kind, path)
+		}
+		data[alias] = node
+	}
+	if strings.Contains(query, "projects(ids:") {
+		data["l0"] = map[string]any{"nodes": ids}
+	}
+	return data
+}
+
+// mintAnswer is what GitLab answers to personalAccessTokenCreate.
+func mintAnswer() map[string]any {
+	return map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
+}
+
+// lookupRequest answers the lookup document for a test's API, and reports
+// whether the request was the mint instead.
+func lookupRequest(t *testing.T, query, user string, answers map[string]any, ids []any) (minted bool, answer any) {
+	t.Helper()
+	if strings.Contains(query, "personalAccessTokenCreate") {
+		return true, mintAnswer()
+	}
+	return false, map[string]any{"data": lookupAnswers(t, query, user, answers, ids)}
+}
 
 // namespacedConfig allows two groups (one a subgroup), alice's personal
 // projects and one project elsewhere.
@@ -235,33 +292,32 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 	c := testConfig().GitLab
 	name := ""
 	deleted := false
+	// The earlier format resolves its project IDs, then checks the paths.
+	ids := []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}}
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		if r.Header.Get("Authorization") != "Bearer issuer" {
 			t.Error("incorrect credential")
 		}
 		switch {
-		case r.URL.Path == "/api/v4/user":
-			return 200, map[string]string{"username": "alice"}
-		case r.URL.Path == "/api/v4/projects/42":
-			return 200, map[string]string{"path_with_namespace": "group/project"}
 		case r.URL.Path == "/api/graphql":
-			var payload struct {
-				Variables struct {
-					Input struct {
-						Name      string  `json:"name"`
-						ExpiresAt string  `json:"expiresAt"`
-						Scopes    []Scope `json:"granularScopes"`
-					} `json:"input"`
-				} `json:"variables"`
+			query, variables := graphqlPayload(t, r)
+			minted, answer := lookupRequest(t, query, "alice", nil, ids)
+			if !minted {
+				return 200, answer
 			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			var input struct {
+				Name      string  `json:"name"`
+				ExpiresAt string  `json:"expiresAt"`
+				Scopes    []Scope `json:"granularScopes"`
+			}
+			if err := json.Unmarshal(variables["input"], &input); err != nil {
 				t.Error(err)
 			}
-			name = payload.Variables.Input.Name
-			if !strings.HasPrefix(name, "geas-") || payload.Variables.Input.ExpiresAt != "2026-10-10" || len(payload.Variables.Input.Scopes) != 2 {
+			name = input.Name
+			if !strings.HasPrefix(name, "geas-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 {
 				t.Error("bad PAT input")
 			}
-			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
+			return 200, answer
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/personal_access_tokens":
 			if r.URL.Query().Get("search") != name {
 				t.Error("bad search")
@@ -290,17 +346,27 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 	minted := false
 	api := mockAPI(t, func(r *http.Request) (int, any) {
-		if strings.HasSuffix(r.URL.Path, "/user") {
-			return 200, map[string]string{"username": "alice"}
-		}
-		if r.URL.Path == "/api/graphql" {
-			minted = true
-		}
-		return 200, map[string]string{"path_with_namespace": "wrong/project"}
+		query, _ := graphqlPayload(t, r)
+		var answer any
+		minted, answer = lookupRequest(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
+		return 200, answer
 	})
 	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
+	}
+}
+func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
+	minted := false
+	api := mockAPI(t, func(r *http.Request) (int, any) {
+		query, _ := graphqlPayload(t, r)
+		var answer any
+		minted, answer = lookupRequest(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
+		return 200, answer
+	})
+	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
+		t.Fatal("minted for another user")
 	}
 }
 func TestAPIErrorsDoNotExposeSecrets(t *testing.T) {
@@ -342,6 +408,17 @@ case "$method $last" in
 "GET user") echo '{"username":"alice"}' ;;
 "GET projects/42") echo '{"path_with_namespace":"group/project"}' ;;
 " input="*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
+" query="*)
+	case "$last" in
+	*"projects(ids:"*)
+		echo '{"data":{"currentUser":{"username":"alice"},"l0":{"nodes":[{"id":"gid://gitlab/Project/42","fullPath":"group/project"}]}}}'
+		;;
+	*)
+		echo "unexpected query" >&2
+		exit 1
+		;;
+	esac
+	;;
 "GET personal_access_tokens?"*)
 	name=${last##*search=}
 	name=${name%%&*}
@@ -411,7 +488,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := fakeGlabCalls(t, dir)
-	if len(calls) != 5 {
+	if len(calls) != 4 {
 		t.Fatalf("got %d glab calls: %q", len(calls), calls)
 	}
 	host := []string{"api", "--hostname", "gitlab.com"}
@@ -420,12 +497,10 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 			t.Errorf("call %d not pinned to gitlab.com: %q", i+1, call)
 		}
 	}
-	for i, want := range [][]string{{"--method", "GET", "user"}, {"--method", "GET", "projects/42"}} {
-		if !slices.Equal(calls[i][3:], want) {
-			t.Errorf("call %d: %q", i+1, calls[i])
-		}
+	if !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(glabConfig())}) {
+		t.Errorf("lookup: %q", calls[0])
 	}
-	mint := calls[2][3:]
+	mint := calls[1][3:]
 	if len(mint) != 5 || mint[0] != "graphql" || mint[1] != "-f" || mint[2] != "query="+createPAT || mint[3] != "-F" || !strings.HasPrefix(mint[4], "input=") {
 		t.Fatalf("mint: %q", mint)
 	}
@@ -441,11 +516,11 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	if !strings.HasPrefix(name, "geas-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 || input.Scopes[1].ResourceIDs[0] != "gid://gitlab/Project/42" {
 		t.Errorf("bad PAT input %+v", input)
 	}
-	if !slices.Equal(calls[3][3:], []string{"--method", "GET", "personal_access_tokens?per_page=100&search=" + name}) {
-		t.Errorf("search: %q", calls[3])
+	if !slices.Equal(calls[2][3:], []string{"--method", "GET", "personal_access_tokens?per_page=100&search=" + name}) {
+		t.Errorf("search: %q", calls[2])
 	}
-	if !slices.Equal(calls[4][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
-		t.Errorf("revocation: %q", calls[4])
+	if !slices.Equal(calls[3][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
+		t.Errorf("revocation: %q", calls[3])
 	}
 	for n := 1; n <= len(calls); n++ {
 		raw, _ := os.ReadFile(filepath.Join(dir, "env."+strconv.Itoa(n)))
@@ -578,48 +653,76 @@ func TestGitLabNamespacedConfig(t *testing.T) {
 		t.Fatalf("config.example.json: %v", err)
 	}
 }
+
+// TestLookupDocument pins the one aliased query that replaces the REST user
+// call and the per-namespace lookups, and the escaping of a path in it.
+func TestLookupDocument(t *testing.T) {
+	c := namespacedConfig()
+	c.Groups, c.Projects, c.PersonalProjects = []string{"group", "other/sub"}, []string{"elsewhere/project"}, false
+	want := `query SessionLookup {
+  currentUser { username }
+  g0: group(fullPath: "group") { id fullPath }
+  g1: group(fullPath: "other/sub") { id fullPath }
+  p0: project(fullPath: "elsewhere/project") { id fullPath }
+}
+`
+	if got := lookupDocument(c); got != want {
+		t.Fatalf("document:\n%s", got)
+	}
+	// The earlier format asks for its project IDs, one node per ID.
+	c = testConfig().GitLab
+	want = `query SessionLookup {
+  currentUser { username }
+  l0: projects(ids: ["gid://gitlab/Project/42"]) { nodes { id fullPath } }
+}
+`
+	if got := lookupDocument(c); got != want {
+		t.Fatalf("earlier format:\n%s", got)
+	}
+	// A quote in a path would end the string literal, so it is escaped.
+	c = GitLabConfig{Groups: []string{`group"x`}}
+	if got, want := lookupDocument(c), `g0: group(fullPath: "group\"x")`; !strings.Contains(got, want) {
+		t.Fatalf("unescaped path: %s", got)
+	}
+}
 func TestGitLabNamespacedScopes(t *testing.T) {
 	var scopes []Scope
-	var lookups []string
+	lookups := 0
+	answers := map[string]any{
+		"group":             map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "group"},
+		"other/sub":         map[string]any{"id": "gid://gitlab/Group/8", "fullPath": "other/sub"},
+		"elsewhere/project": map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "elsewhere/project"},
+	}
 	api := mockAPI(t, func(r *http.Request) (int, any) {
-		switch {
-		case r.URL.Path == "/api/v4/user":
-			return 200, map[string]string{"username": "alice"}
-		case r.URL.Path == "/api/graphql":
-			var payload struct {
-				Variables struct {
-					Input struct {
-						Scopes []Scope `json:"granularScopes"`
-					} `json:"input"`
-				} `json:"variables"`
+		switch r.URL.Path {
+		case "/api/graphql":
+			query, variables := graphqlPayload(t, r)
+			minted, answer := lookupRequest(t, query, "alice", answers, nil)
+			if !minted {
+				lookups++
+				return 200, answer
 			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			var input struct {
+				Scopes []Scope `json:"granularScopes"`
+			}
+			if err := json.Unmarshal(variables["input"], &input); err != nil {
 				t.Error(err)
 			}
-			scopes = payload.Variables.Input.Scopes
-			return 200, map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
-		case r.URL.Path == "/api/v4/personal_access_tokens":
+			scopes = input.Scopes
+			return 200, answer
+		case "/api/v4/personal_access_tokens":
 			return 200, []map[string]any{{"id": 1, "name": r.URL.Query().Get("search")}}
 		}
-		// Subgroup and project paths must travel as one escaped segment.
-		lookups = append(lookups, r.URL.EscapedPath())
-		switch r.URL.EscapedPath() {
-		case "/api/v4/groups/group":
-			return 200, map[string]any{"id": 7, "full_path": "group"}
-		case "/api/v4/groups/other%2Fsub":
-			return 200, map[string]any{"id": 8, "full_path": "other/sub"}
-		case "/api/v4/projects/elsewhere%2Fproject":
-			return 200, map[string]any{"id": 42, "path_with_namespace": "elsewhere/project"}
-		}
-		t.Errorf("unexpected %s %s", r.Method, r.URL.EscapedPath())
+		t.Errorf("unexpected %s %s", r.Method, r.URL)
 		return 404, nil
 	})
 	g := &GitLab{Config: namespacedConfig(), Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
-	if len(lookups) != 3 {
-		t.Fatalf("lookups %q", lookups)
+	// The user and every namespace come from one document.
+	if lookups != 1 {
+		t.Fatalf("%d lookup queries", lookups)
 	}
 	permissions := []string{"read_project", "push_code"}
 	want := []Scope{
@@ -644,22 +747,21 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		answer map[string]any
+		answer any
 	}{
-		{"renamed group", map[string]any{"id": 7, "full_path": "renamed"}},
-		{"case differs", map[string]any{"id": 7, "full_path": "Group"}},
-		{"no id", map[string]any{"full_path": "group"}},
-		{"project fields for a group", map[string]any{"id": 7, "path_with_namespace": "group"}},
+		{"renamed group", map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "renamed"}},
+		{"case differs", map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "Group"}},
+		{"no id", map[string]any{"fullPath": "group"}},
+		{"another model's id", map[string]any{"id": "gid://gitlab/Project/7", "fullPath": "group"}},
+		{"project fields for a group", map[string]any{"id": "gid://gitlab/Group/7", "pathWithNamespace": "group"}},
+		{"missing path", nil},
 	} {
 		minted := false
 		api := mockAPI(t, func(r *http.Request) (int, any) {
-			switch r.URL.Path {
-			case "/api/v4/user":
-				return 200, map[string]string{"username": "alice"}
-			case "/api/graphql":
-				minted = true
-			}
-			return 200, tc.answer
+			query, _ := graphqlPayload(t, r)
+			var answer any
+			minted, answer = lookupRequest(t, query, "alice", map[string]any{"group": tc.answer}, nil)
+			return 200, answer
 		})
 		c := namespacedConfig()
 		c.Groups, c.Projects = []string{"group"}, nil

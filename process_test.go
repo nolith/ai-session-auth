@@ -705,10 +705,10 @@ echo harness done`
 	if _, err := os.Stat(filepath.Join(fakes, "gh-called")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the gh wrapper reached the real gh")
 	}
-	// The issuer's user check, and nothing after it: no PAT, so no reaper and
-	// no revocation; the glab wrapper never reached the real glab.
+	// The issuer's lookup, and nothing after it: no PAT, so no reaper and no
+	// revocation; the glab wrapper never reached the real glab.
 	calls := fakeGlabCalls(t, fakes)
-	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"--method", "GET", "user"}) {
+	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(glabConfig())}) {
 		t.Errorf("glab calls: %q", calls)
 	}
 }
