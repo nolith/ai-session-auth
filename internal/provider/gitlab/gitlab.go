@@ -58,7 +58,10 @@ func (b bearerIssuer) graphql(ctx context.Context, query string, variables map[s
 // token itself, so revocation still works hours after the session started.
 type glabIssuer struct {
 	executable string // absolute, resolved once, at the start
-	lockPath   string // withFileLock adds ".lock": one OAuth refresh at a time
+	// lockPath is the same for every host and every session, with ".lock"
+	// added: glab keeps all hosts in one config.yml, so one call at a time,
+	// whichever host it asks, can rotate a refresh token.
+	lockPath string
 }
 
 // glabUnset keeps the issuer on the user's own gitlab.com login: no token or
@@ -105,7 +108,7 @@ func (g glabIssuer) graphql(ctx context.Context, query string, variables map[str
 func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 	// Pinned: otherwise glab picks the host from the cwd's remote.
 	args = append([]string{"api", "--hostname", host}, args...)
-	return secretfile.WithFileLock(ctx, g.lockPath, func() error {
+	return secretfile.HoldFileLock(ctx, g.lockPath, func(lock *os.File) error {
 		// A locked keychain must fail the request, not hang the session.
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
@@ -115,6 +118,10 @@ func (g glabIssuer) run(ctx context.Context, out any, args ...string) error {
 		// Its own process group: the SIGHUP of a closing terminal, or another
 		// Ctrl-C, must not cut a revocation short.
 		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		// glab holds the lock for as long as it runs: if the launcher dies
+		// meanwhile, the reaper's glab still waits for this one to finish
+		// rotating the login.
+		command.ExtraFiles = []*os.File{lock}
 		environment := procenv.Map(os.Environ())
 		for _, key := range glabUnset {
 			delete(environment, key)
@@ -142,13 +149,16 @@ type Provider struct {
 	// after it.
 	Duration time.Duration
 	Now      func() time.Time
-	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
+	// Steps times the issuer calls for GEAS_DEBUG=timing; nil when off.
 	Steps *timing.Timer
 
 	mu sync.Mutex
 	// minted names the PATs this process minted: an ID it resolved for one
 	// of them needs no check before the DELETE.
 	minted map[string]bool
+	// unresolved are the ledger entries of minted PATs whose ID Settle has
+	// yet to resolve.
+	unresolved []ledger.Entry
 }
 
 // New returns the provider for one GitLab host, whose session PATs last for
@@ -172,7 +182,10 @@ func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *ti
 	return &Provider{Config: host, Issuer: bearerIssuer{client: a, token: token}, Duration: duration, Now: time.Now, Steps: steps}, nil
 }
 
-var _ provider.Provider = (*Provider)(nil)
+var (
+	_ provider.Provider = (*Provider)(nil)
+	_ provider.Settler  = (*Provider)(nil)
+)
 
 // host is the instance; only gitlab.com is configurable so far.
 const host = "gitlab.com"
@@ -209,9 +222,6 @@ func (g *Provider) Setup() provider.Setup {
 	}
 }
 
-// Acquire mints the session PAT and resolves its ID, so that the exit needs a
-// single DELETE. The PAT's name is in the ledger before the mint, and its ID
-// once it is resolved.
 // glabConfigDir is where glab keeps the user's login, resolved as glab
 // resolves it: GLAB_CONFIG_DIR, else $XDG_CONFIG_HOME/glab-cli, else the OS's
 // user configuration directory, which on macOS is
@@ -230,6 +240,8 @@ func glabConfigDir(getenv func(string) string, userConfigDir func() (string, err
 	return filepath.Join(base, "glab-cli"), nil
 }
 
+// Acquire mints the session PAT. Its name is in the ledger before the mint;
+// Settle resolves its ID afterwards, once the token is handed over.
 func (g *Provider) Acquire(ctx context.Context, l *ledger.Ledger) (provider.Credential, error) {
 	token, err := g.create(ctx, l, g.Duration)
 	if err != nil {
@@ -252,7 +264,7 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 		return "", err
 	}
 	resolved, err := g.lookup(ctx)
-	g.Steps.Step("GitLab issuer lookup")
+	g.Steps.Step("lookup")
 	if err != nil {
 		return "", err
 	}
@@ -268,6 +280,10 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 		return "", err
 	}
 	name := "geas-" + hex.EncodeToString(random)
+	// Nothing exists yet: a session that has ended mints nothing.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	// The mutation returns no ID: with the name on disk first, a session that
 	// dies before it resolves the ID still leaves the reaper a PAT to find.
 	entry := ledger.Entry{Provider: g.ID(), Name: name, Created: g.Now().UTC()}
@@ -286,7 +302,11 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 			} `json:"personalAccessTokenCreate"`
 		} `json:"data"`
 	}
-	if err := g.Issuer.graphql(ctx, createPAT, variables, &result); err != nil {
+	// Once sent, the mint runs to its answer, within the issuer's own
+	// timeout, even when the harness exits meanwhile: the exit then revokes a
+	// PAT it knows exists, and never takes a mint cut short for one that
+	// created nothing.
+	if err := g.Issuer.graphql(context.WithoutCancel(ctx), createPAT, variables, &result); err != nil {
 		return "", err
 	}
 	g.Steps.Step("mint")
@@ -306,22 +326,34 @@ func (g *Provider) create(ctx context.Context, l *ledger.Ledger, duration time.D
 		g.minted = map[string]bool{}
 	}
 	g.minted[name] = true
+	g.unresolved = append(g.unresolved, entry)
 	g.mu.Unlock()
-	// The mutation returns no ID. Resolving it now leaves a single DELETE for
-	// the exit, which may have little time, and gives the reaper its target.
-	id, err := g.find(ctx, name)
-	g.Steps.Step("id lookup")
-	if errors.Is(err, ledger.ErrNotFound) {
-		err = errUnresolved
-	}
-	if err != nil {
-		return "", provider.CreatedError{Err: err}
-	}
-	entry.ID = id
-	if err := l.Record(entry); err != nil {
-		return "", provider.CreatedError{Err: err}
-	}
 	return result.Data.Create.Token, nil
+}
+
+// Settle resolves the IDs of the PATs this process minted, after their
+// tokens are handed over: the mutation returns no ID, and the exit, which may
+// have little time, then needs a single DELETE. Until it does, the ledger
+// has the PAT's name, which the exit and the reaper search for.
+func (g *Provider) Settle(ctx context.Context, l *ledger.Ledger) error {
+	g.mu.Lock()
+	entries := g.unresolved
+	g.unresolved = nil
+	g.mu.Unlock()
+	var errs []error
+	for _, entry := range entries {
+		id, err := g.find(ctx, entry.Name)
+		g.Steps.Step("id lookup")
+		if errors.Is(err, ledger.ErrNotFound) {
+			err = errUnresolved
+		}
+		if err == nil {
+			entry.ID = id
+			err = l.Record(entry)
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // lookup is the issuer lookup's answer: the issuer's user and every namespace

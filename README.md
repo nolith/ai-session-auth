@@ -50,7 +50,9 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
   your own `glab` login or a stored issuer PAT.
 - GitLab access restricted to selected groups, your personal projects or single
   projects, without PAT management permissions in the agent token.
-- Username verification on both providers before starting the harness.
+- A harness that starts at once: credentials arrive in the background, and
+  Git's credential helper waits briefly for them.
+- Username verification on both providers before a credential is handed over.
 - `gh` and `glab` configured from the session directory: the real binaries
   run, from wherever `PATH` finds them, with the session's credentials in
   their own configuration files. No wrappers, no `PATH` changes.
@@ -130,16 +132,19 @@ Every issuer request then runs `glab api --hostname gitlab.com ...`:
   `CI_JOB_TOKEN`, `GLAB_CONFIG_DIR`, host overrides or HTTP
   debugging, so it acts with your own login, never with a session's.
 - Calls are serialized through `$XDG_STATE_HOME/geas/glab.lock`
-  (`~/.local/state/geas/glab.lock` by default). GitLab returns a
-  new refresh token on every refresh, so two glab processes refreshing at once
-  can race. The lock covers geas's own calls, not yours.
+  (`~/.local/state/geas/glab.lock` by default), one lock for every host and
+  every session. GitLab returns a new refresh token on every refresh, and glab
+  keeps every host's login in one file, so two glab processes refreshing at
+  once can race. glab holds the lock for as long as it runs, even when the
+  launcher dies during the call; nothing else the launcher starts inherits it.
+  The lock covers geas's own calls, not yours.
 - Each call gets one minute, so a keyring waiting to be unlocked fails the
   request instead of stalling the session.
 - glab's output is never printed. A failure reports only "glab issuer request
   failed"; run the same `glab api` command yourself to see why.
 
 If the login breaks (`glab auth logout`, a failed refresh, a revoked
-authorization), sessions fail to start, and running sessions cannot revoke
+authorization), GitLab fails in every new session, and running sessions cannot revoke
 their PATs, which then expire on their own. `glab auth login` fixes both.
 
 ### Issuer: a stored PAT
@@ -183,7 +188,7 @@ List what agents may reach by path, with no numeric IDs:
 
 At session start, each group and project is looked up with `GET groups/:path`
 or `GET projects/:path` and refused unless GitLab reports the same path, in the
-same case, so a renamed or mistyped namespace stops the session before any PAT
+same case, so a renamed or mistyped namespace fails GitLab before any PAT
 exists. The session PAT then gets `read_user` on your user (`USER`), the
 permissions on the resolved groups and projects (`SELECTED_MEMBERSHIPS`), and
 on your personal projects (`PERSONAL_PROJECTS`) if enabled. `ALL_MEMBERSHIPS`
@@ -241,17 +246,18 @@ Use absolute paths to launch the harness from another checkout:
 The current working directory and command arguments are preserved.
 To use only one provider, set `enabled: false` for the other.
 
-A provider with `optional: true` (default `false`) does not stop the session
-when its credential cannot be obtained at start: a missing, unreadable or
-expired GitHub login, a failed refresh or `expected_user` check, or for GitLab
-a failed issuer (logged-out glab, unreadable `issuer_token_file`), user check,
-group or project resolution or PAT creation. The launcher prints one warning
-per skipped provider, with the reason and the fix (`geas github-login`,
-`glab auth login` or `geas save-gitlab-issuer`), and starts the harness
-even if every enabled provider was skipped. Configuration errors, a missing
-`gh` or `glab`, and an interrupted start still stop it. The example marks
-GitHub optional, so a lapsed GitHub login does not keep agents from starting
-with GitLab.
+A provider whose credential cannot be obtained never stops the session: a
+missing, unreadable or expired GitHub login, a failed refresh or
+`expected_user` check, or for GitLab a failed issuer (logged-out or missing
+glab, unreadable `issuer_token_file`), user check, group or project
+resolution or PAT creation. The harness has started by then; the provider's
+marker records the reason (see "Session start"), and nothing is printed.
+Fix the login (`geas github-login`, `glab auth login` or
+`geas save-gitlab-issuer`) and start a new session. Configuration errors still
+stop the session before the harness starts.
+
+Every provider now behaves as `optional: true` did: the `optional` field is
+still accepted, and has no effect.
 
 ## Verify on your account
 
@@ -293,6 +299,35 @@ closed terminal or pane stop the harness process group and revoke it too; the
 launcher revokes before printing anything, survives an output that has gone
 away, and runs glab in its own process group so that the hangup cannot
 interrupt a revocation.
+
+### Session start
+
+A session starts in this order, and the harness never waits for the network:
+
+1. **Plan**, without a network call: the configuration, the session
+   directory with its gitconfig and sandbox policy, and one marker per
+   provider, `pending`.
+2. **The reaper** starts, before anything revocable exists.
+3. **The harness** starts.
+4. **Every provider acquires its credential in the background**, in
+   parallel: it writes the credential's files and its tools' configuration,
+   then its marker, `ready`, or `failed` with the reason. GitLab resolves the
+   session PAT's ID after its marker is ready; until then the ledger has the
+   PAT's name, which is enough to revoke it. GitHub's token is refreshed in
+   the background from then on.
+
+Nothing is printed while the harness runs: a line would scribble over an
+agent's terminal. Failures go to the markers, and Git's credential helper
+reports them. A provider that failed stays unavailable for the session.
+`GEAS_DEBUG=timing` prints each step's duration on stderr up to
+`harness start`; the providers' steps, prefixed with their ID and with the
+time since the harness started, follow once the harness has exited.
+
+When the harness exits during a GitLab mint, the launcher waits for the mint's
+answer, within glab's or the API's timeout, and revokes the PAT: a mint, once
+sent, is never cut short.
+
+### The session directory
 
 Each session has a directory of its own,
 `$XDG_STATE_HOME/geas/sessions/<session id>`
@@ -337,14 +372,15 @@ expiry or earlier invalidation by GitHub.
 A running `gh` command cannot replace its token while it executes; restart
 long-running watch commands if they cross a token expiry or rotation.
 
-A skipped optional provider stays unavailable for the whole session, and never
+A provider that failed stays unavailable for the whole session, and never
 falls back to your own login: `GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` still point
 into the session directory, where no token arrives, so `gh` or `glab` reports
 that it is not logged in. The provider's marker records the reason, and Git
 HTTPS to an allowlisted repository on that host fails at once, with the helper
 telling Git to quit, with "<host> is not available in this session: <reason>",
-rather than ask a terminal or askpass program. A skipped GitLab mints no PAT, so its ledger stays empty
-and there is nothing to revoke at exit. Start a new session after fixing the login.
+rather than ask a terminal or askpass program. A GitLab that failed before its
+mint has nothing in the ledger to revoke at exit. Start a new session after
+fixing the login.
 
 ## What the harness sees
 
@@ -380,7 +416,7 @@ replaced atomically):
 | `gitconfig`                     | the launcher, at start                                  | Git, through `include.path`         |
 | `git/hosts.json`                | the launcher, at start: hosts and allowlists            | `geas credential`                   |
 | `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed | `geas credential`                   |
-| `markers/<provider>`            | the launcher: `ready`, or `failed` with the reason      | `geas credential`                   |
+| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason | `geas credential`         |
 | `glab/config.yml`               | the GitLab renderer, one entry per host                 | `glab`                              |
 | `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                     | `gh`                                |
 | `sandbox/policy.json`           | the launcher, at start                                  | `geas sandbox check`                |
@@ -484,8 +520,9 @@ OS, the Git credential helper with real Git, the sandbox check, the GitHub
 refresh, exit codes, process-group timeouts, revocation after SIGHUP with the
 output gone, the ledger, the reaper after SIGKILL (also during the mint,
 finding the PAT by name) and its silence after a clean exit, nested sessions,
-cancellable issuer input, and optional providers skipped with warnings while
-Git refuses, or stopping the session when required.
+cancellable issuer input, the harness starting before any provider step,
+a harness exiting during the mint, one glab lock across hosts, and failing
+providers that never stop the start while Git refuses.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:
 formatting, vet, race-enabled tests, and the build.

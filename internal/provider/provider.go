@@ -20,8 +20,8 @@ import (
 )
 
 // A Provider is one credential source for one host, e.g. GitLab on
-// gitlab.com. The session acquires its credential before the harness starts
-// and revokes what the ledger lists when the session ends.
+// gitlab.com. The session runs Acquire in the background after the harness
+// has started, and revokes what the ledger lists when the session ends.
 type Provider interface {
 	// ID is unique within a session, e.g. "gitlab:gitlab.com".
 	ID() string
@@ -158,10 +158,10 @@ func MergeEnv(providers []Provider, reserved func(name string) bool) (map[string
 	return merged, nil
 }
 
-// CreatedError is an Acquire failure that came after the credential was
-// created: the provider has something to revoke, so the session does not skip
-// it as it skips a provider that failed before creating anything.
-type CreatedError struct{ Err error }
-
-func (e CreatedError) Error() string { return e.Err.Error() }
-func (e CreatedError) Unwrap() error { return e.Err }
+// A Settler has bookkeeping left once its credential is handed over, such as
+// GitLab's id lookup: the session runs Settle after the provider's marker is
+// ready, so that nothing waits for it. Whatever Settle leaves undone, the
+// ledger already holds enough to revoke the credential.
+type Settler interface {
+	Settle(ctx context.Context, l *ledger.Ledger) error
+}

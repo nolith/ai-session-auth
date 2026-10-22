@@ -190,7 +190,15 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
+	// The token is handed over before the id lookup, which Settle runs.
 	entries, err := book.Entries()
+	if err != nil || len(entries) != 1 || entries[0].Name != name || entries[0].ID != 0 {
+		t.Fatalf("ledger before the id lookup: %+v %v", entries, err)
+	}
+	if err = g.Settle(context.Background(), book); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = book.Entries()
 	if err != nil || len(entries) != 1 || entries[0].Name != name || entries[0].ID != 42 || entries[0].Revoked {
 		t.Fatalf("ledger after the id lookup: %+v %v", entries, err)
 	}
@@ -256,6 +264,9 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	token, err := g.create(context.Background(), book, 24*time.Hour)
 	if err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
+	}
+	if err = g.Settle(context.Background(), book); err != nil {
+		t.Fatal(err)
 	}
 	entries, err := book.Entries()
 	if err != nil || len(entries) != 1 {
@@ -324,6 +335,52 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 		t.Fatalf("lock: %v %v", info, err)
 	}
 }
+
+// Every glab call takes the same lock, whichever provider makes it: glab
+// keeps every host's login in one config.yml. glab holds the lock for as
+// long as it runs, and nothing else the launcher starts meanwhile does.
+func TestGlabIssuerLockIsShared(t *testing.T) {
+	dir := t.TempDir()
+	// Fails on an overlap, and reports whether it holds the lock on fd 3.
+	script := "#!/bin/sh\nmkdir " + quoteShell(filepath.Join(dir, "busy")) + " || { echo overlap; exit 1; }\nsleep 0.1\nrmdir " + quoteShell(filepath.Join(dir, "busy")) + "\n" +
+		"if [ -e /dev/fd/3 ]; then echo '{\"fd3\":true}'; else echo '{\"fd3\":false}'; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "glab"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var issuers []glabIssuer
+	for range 4 {
+		g, err := New(testutil.GlabConfig(), time.Hour, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issuers = append(issuers, g.Issuer.(glabIssuer))
+	}
+	errs := make(chan error, len(issuers))
+	for _, issuer := range issuers {
+		if issuer.lockPath != issuers[0].lockPath {
+			t.Fatalf("lock paths differ: %s %s", issuer.lockPath, issuers[0].lockPath)
+		}
+		go func() {
+			var answer struct {
+				FD3 bool `json:"fd3"`
+			}
+			err := issuer.rest(context.Background(), http.MethodGet, "user", &answer)
+			if err == nil && !answer.FD3 {
+				err = errors.New("glab ran without the lock")
+			}
+			errs <- err
+		}()
+	}
+	for range issuers {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func TestGlabIssuerFailureIsSilent(t *testing.T) {
 	dir := testutil.FakeGlab(t)

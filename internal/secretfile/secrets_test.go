@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +52,29 @@ func TestFileLockCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// The lock is close-on-exec: a process started while it is held keeps it
+// only when handed it explicitly.
+func TestHeldLockIsNotInherited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "glab")
+	err := HoldFileLock(context.Background(), path, func(lock *os.File) error {
+		fd := strconv.Itoa(int(lock.Fd()))
+		probe := "if [ -e /dev/fd/" + fd + " ]; then echo inherited; fi; if [ -e /dev/fd/3 ]; then echo handed; fi"
+		output, err := exec.Command("/bin/sh", "-c", probe).Output()
+		if err != nil || string(output) != "" {
+			t.Errorf("without ExtraFiles: %q %v", output, err)
+		}
+		command := exec.Command("/bin/sh", "-c", probe)
+		command.ExtraFiles = []*os.File{lock}
+		output, err = command.Output()
+		if err != nil || !strings.HasSuffix(string(output), "handed\n") {
+			t.Errorf("with ExtraFiles: %q %v", output, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

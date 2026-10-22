@@ -107,10 +107,18 @@ func WriteJSON(path string, value any) error {
 // to it: a credential that rotates on every write, such as glab's OAuth
 // refresh token, cannot be rotated twice at once. The wait ends with ctx.
 func WithFileLock(ctx context.Context, path string, operation func() error) error {
+	return HoldFileLock(ctx, path, func(*os.File) error { return operation() })
+}
+
+// HoldFileLock is WithFileLock handing operation the locked file. The file is
+// close-on-exec, so no process the launcher starts meanwhile keeps the lock
+// by accident; a child that must hold it for as long as it runs, as glab
+// does while it may rotate its login, gets it explicitly.
+func HoldFileLock(ctx context.Context, path string, operation func(lock *os.File) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	fd, err := syscall.Open(path+".lock", syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	fd, err := syscall.Open(path+".lock", syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
 	if err != nil {
 		return err
 	}
@@ -140,5 +148,5 @@ func WithFileLock(ctx context.Context, path string, operation func() error) erro
 		}
 	}
 	defer syscall.Flock(fd, syscall.LOCK_UN)
-	return operation()
+	return operation(file)
 }

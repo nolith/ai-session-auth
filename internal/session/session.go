@@ -1,7 +1,7 @@
 // Package session runs one session: it creates the session directory and
-// starts the revocation reaper, resolves the credentials the harness needs
-// into that directory, hands the harness an environment that reads them, and
-// revokes them when it exits.
+// starts the revocation reaper, starts the harness with an environment that
+// reads that directory, acquires the credentials into it in the background,
+// and revokes them when the harness exits.
 package session
 
 import (
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,7 +43,17 @@ func exitCode(err error) int {
 	}
 	return 1
 }
-func runHarness(ctx context.Context, args, environment []string, duration time.Duration) (int, error) {
+
+// harness is the started harness, the leader of its own process group, in
+// the terminal's foreground when there is a terminal.
+type harness struct {
+	command  *exec.Cmd
+	terminal bool
+	previous int // the terminal's foreground group before the harness
+	wait     chan error
+}
+
+func startHarness(args, environment []string) (*harness, error) {
 	command := exec.Command(args[0], args[1:]...)
 	command.Env = environment
 	command.Stdin = os.Stdin
@@ -53,23 +64,29 @@ func runHarness(ctx context.Context, args, environment []string, duration time.D
 	terminal := terminalErr == nil
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Foreground: terminal, Ctty: int(os.Stdin.Fd())}
 	if err := command.Start(); err != nil {
-		return 1, errors.New("cannot start harness; check executable and arguments")
+		return nil, errors.New("cannot start harness; check executable and arguments")
 	}
-	if terminal {
+	h := &harness{command: command, terminal: terminal, previous: previous, wait: make(chan error, 1)}
+	go func() { h.wait <- command.Wait() }()
+	return h, nil
+}
+
+// await returns the harness's exit code once it exits, or stops its process
+// group when ctx ends or the session's time is up.
+func (h *harness) await(ctx context.Context, duration time.Duration) (int, error) {
+	if h.terminal {
 		defer func() {
 			signal.Ignore(syscall.SIGTTOU)
-			setTerminalProcessGroup(int(os.Stdin.Fd()), previous)
+			setTerminalProcessGroup(int(os.Stdin.Fd()), h.previous)
 			signal.Reset(syscall.SIGTTOU)
 		}()
 	}
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	var reason error
 	code := 1
 	select {
-	case err := <-wait:
+	case err := <-h.wait:
 		return exitCode(err), nil
 	case <-ctx.Done():
 		reason = errors.New("session interrupted")
@@ -78,9 +95,17 @@ func runHarness(ctx context.Context, args, environment []string, duration time.D
 		reason = errors.New("session time limit reached; stopping harness")
 		code = 124
 	}
-	syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
-	stopProcessGroup(command.Process.Pid, wait, 5*time.Second)
+	syscall.Kill(-h.command.Process.Pid, syscall.SIGTERM)
+	stopProcessGroup(h.command.Process.Pid, h.wait, 5*time.Second)
 	return code, reason
+}
+
+func runHarness(ctx context.Context, args, environment []string, duration time.Duration) (int, error) {
+	h, err := startHarness(args, environment)
+	if err != nil {
+		return 1, err
+	}
+	return h.await(ctx, duration)
 }
 
 func stopProcessGroup(processGroup int, wait <-chan error, grace time.Duration) {
@@ -116,22 +141,22 @@ func stopProcessGroup(processGroup int, wait <-chan error, grace time.Duration) 
 	}
 }
 
-// skippable reports why an optional provider is skipped, or "" when err must
-// stop the session: the provider is required, or the session was interrupted.
-// The reason, like main's, names no local path.
-func skippable(ctx context.Context, optional bool, err error) string {
-	if !optional || ctx.Err() != nil {
-		return ""
-	}
+// reason is why a provider failed, as its marker records it for the harness:
+// one line, which, like main's errors, names no local path.
+func reason(err error) string {
 	if errors.As(err, new(*os.PathError)) {
 		return "local file or permission error"
 	}
-	return err.Error()
-}
-
-// skip warns that an optional provider is unavailable, and how to fix it.
-func skip(output io.Writer, provider, reason, fix string) {
-	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
+	text := strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, err.Error())
+	if len(text) > 200 {
+		text = text[:200]
+	}
+	return text
 }
 
 // displayName is how the output names a provider kind.
@@ -200,20 +225,41 @@ func teardown(dir *sessiondir.Dir, book *ledger.Ledger, providers []provider.Pro
 	}
 }
 
-// mark records how far a provider got, for the credential helper and, later,
-// geas status. A marker that cannot be written leaves the provider pending,
-// which the helper reports as unavailable too.
-func mark(dir *sessiondir.Dir, id, skipped string) {
-	m := sessiondir.Marker{State: sessiondir.Ready, Time: time.Now().UTC()}
-	if skipped != "" {
-		m = sessiondir.Marker{State: sessiondir.Failed, Reason: skipped, Time: m.Time}
-	}
-	dir.SetMarker(id, m)
+// mark records how far a provider got, for the credential helper and geas
+// status. A marker that cannot be written leaves the previous state, which
+// the helper never takes for ready.
+func mark(dir *sessiondir.Dir, id, state, reason string) error {
+	return dir.SetMarker(id, sessiondir.Marker{State: state, Reason: reason, Time: time.Now().UTC()})
 }
 
-// Run runs one session around args: it resolves the providers' credentials,
-// starts the harness, and revokes what it minted on the way out. The exit code
-// it returns is the harness's.
+// plan builds the enabled providers from the configuration, without a
+// network call. A provider that cannot even be prepared, such as GitLab
+// without glab or with an unreadable issuer file, is kept for its setup and
+// configuration, and failed lists why: it never acquires anything, and the
+// session starts all the same.
+func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers []provider.Provider, failed map[string]string) {
+	failed = map[string]string{}
+	if config.Enabled(settings.GitLab.Enabled) {
+		gl, err := gitlab.New(settings.GitLab, settings.Duration(), api, nil)
+		if err != nil {
+			gl = &gitlab.Provider{Config: settings.GitLab}
+			failed[gl.ID()] = reason(err)
+		}
+		gl.Steps = timer.Child(gl.ID())
+		providers = append(providers, gl)
+	}
+	if config.Enabled(settings.GitHub.Enabled) {
+		providers = append(providers, github.New(settings.GitHub, api))
+	}
+	return providers, failed
+}
+
+// Run runs one session around args. It plans the session without a network
+// call, starts the reaper, then the harness, and only then acquires the
+// providers' credentials, in parallel, in the background: the harness never
+// waits for the network. A provider that fails is marked failed and never
+// stops the session; nothing prints while the harness runs. The exit code
+// is the harness's, and what the session minted is revoked on the way out.
 func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
@@ -222,42 +268,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if err != nil {
 		return 1, err
 	}
-	gitlabFix := "geas save-gitlab-issuer"
-	if settings.GitLab.Issuer == "glab" {
-		gitlabFix = "glab auth login"
-	}
-	// A skipped optional provider keeps its configuration directory and
-	// credential helper, whose answer is then an error, from its marker:
-	// never your own credentials.
-	var githubSkipped, gitlabSkipped string
-	var gl *gitlab.Provider
-	if config.Enabled(settings.GitLab.Enabled) {
-		gl, err = gitlab.New(settings.GitLab, settings.Duration(), api, timer)
-		if err != nil {
-			// A missing glab is setup, like a missing gh; an unreadable issuer
-			// file is a credential, like GitHub's state file.
-			if settings.GitLab.Issuer == "glab" {
-				return 1, err
-			}
-			if gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err); gitlabSkipped == "" {
-				return 1, err
-			}
-			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-			// Kept for its ID and configuration, never asked for a credential.
-			gl = &gitlab.Provider{Config: settings.GitLab}
-		}
-	}
-	var gh *github.Provider
-	if config.Enabled(settings.GitHub.Enabled) {
-		gh = github.New(settings.GitHub, api)
-	}
-	var providers []provider.Provider
-	if gl != nil {
-		providers = append(providers, gl)
-	}
-	if gh != nil {
-		providers = append(providers, gh)
-	}
+	providers, failed := plan(settings, api, timer)
 	id, err := sessiondir.NewID(time.Now())
 	if err != nil {
 		return 1, err
@@ -297,7 +308,18 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		dir.Remove()
 		return 1, err
 	}
-	store := newCredentials(dir)
+	// Every provider has a marker before the harness can look for one.
+	for _, p := range providers {
+		state, why := sessiondir.Pending, ""
+		if why = failed[p.ID()]; why != "" {
+			state = sessiondir.Failed
+		}
+		if err = mark(dir, p.ID(), state, why); err != nil {
+			dir.Remove()
+			return 1, err
+		}
+	}
+	timer.Step("plan")
 	// The reaper's pipe: closed without "revoked", it revokes the ledger
 	// itself and removes the session's directory.
 	var reaper *os.File
@@ -308,58 +330,56 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if reaper, err = startReaper(binary, settings.Source(), id); err != nil {
 		return 1, err
 	}
-	var githubCredential provider.Credential
-	if gh != nil {
-		githubCredential, err = gh.Acquire(ctx, book)
-		timer.Step("GitHub token")
-		if err != nil {
-			if githubSkipped = skippable(ctx, settings.GitHub.Optional, err); githubSkipped == "" {
-				return 1, err
-			}
-			skip(output, "GitHub", githubSkipped, "geas github-login")
-		} else if err = store.put(gh, githubCredential); err != nil {
-			return 1, err
-		}
-		mark(dir, gh.ID(), githubSkipped)
+	timer.Step("reaper")
+	timer.HarnessStart()
+	h, err := startHarness(args, environment)
+	if err != nil {
+		return 1, err
 	}
-	if gl != nil && gitlabSkipped == "" {
-		credential, err := gl.Acquire(ctx, book)
-		// Skipped only before a PAT exists: a failure after the mint stops the
-		// session, as it always has. The ledger revokes the PAT either way.
-		if err != nil && !errors.As(err, new(provider.CreatedError)) {
-			gitlabSkipped = skippable(ctx, settings.GitLab.Optional, err)
+	// Stopped, and waited for, before teardown revokes what they minted and
+	// removes the directory they write into.
+	acquiring, stop := context.WithCancel(ctx)
+	var acquirers sync.WaitGroup
+	defer func() { stop(); acquirers.Wait(); timer.Flush() }()
+	store := newCredentials(dir)
+	for _, p := range providers {
+		if failed[p.ID()] != "" {
+			continue
 		}
-		if err != nil && gitlabSkipped == "" {
-			return 1, err
-		}
-		if err != nil {
-			skip(output, "GitLab", gitlabSkipped, gitlabFix)
-		} else if err = store.put(gl, credential); err != nil {
-			return 1, err
-		}
-	}
-	if gl != nil {
-		mark(dir, gl.ID(), gitlabSkipped)
-	}
-	if (githubSkipped != "" || !config.Enabled(settings.GitHub.Enabled)) && (gitlabSkipped != "" || !config.Enabled(settings.GitLab.Enabled)) {
-		fmt.Fprintln(output, "Session ready without credentials: every enabled provider was skipped.")
-	} else {
-		fmt.Fprintln(output, "Session ready: user credentials available through gh/glab and Git HTTPS.")
-	}
-	timer.Stop()
-	// Stopped, and waited for, before teardown removes the directory it
-	// writes into.
-	refreshing, stop := context.WithCancel(ctx)
-	var refreshers sync.WaitGroup
-	defer func() { stop(); refreshers.Wait() }()
-	if gh != nil && githubSkipped == "" {
-		refreshers.Add(1)
+		acquirers.Add(1)
 		go func() {
-			defer refreshers.Done()
-			keepFresh(refreshing, store, gh, githubCredential)
+			defer acquirers.Done()
+			acquire(acquiring, store, book, p, timer.Child(p.ID()))
 		}()
 	}
-	return runHarness(ctx, args, environment, settings.Duration())
+	return h.await(ctx, settings.Duration())
+}
+
+// acquire gets p's credential while the harness runs. It writes the
+// credential's files and its kind's tool configuration, then p's ready
+// marker, or a failed one with the reason; then it settles what is left,
+// such as GitLab's id lookup, and keeps the credential fresh for as long as
+// ctx lasts. Nothing prints: the harness owns the terminal.
+func acquire(ctx context.Context, store *credentials, book *ledger.Ledger, p provider.Provider, steps *timing.Timer) {
+	c, err := p.Acquire(ctx, book)
+	if err == nil {
+		err = store.put(p, c)
+	}
+	if err != nil {
+		mark(store.dir, p.ID(), sessiondir.Failed, reason(err))
+		steps.Step("failed")
+		return
+	}
+	if mark(store.dir, p.ID(), sessiondir.Ready, "") != nil {
+		return
+	}
+	steps.Step("ready")
+	if settler, ok := p.(provider.Settler); ok {
+		// Left undone, the exit and the reaper find the credential by the
+		// name the ledger holds.
+		settler.Settle(ctx, book)
+	}
+	keepFresh(ctx, store, p, c)
 }
 
 // refreshMargin is how long before a credential expires keepFresh replaces
@@ -371,8 +391,12 @@ var refreshMargin, refreshRetry = 4 * time.Minute, time.Minute
 // long as ctx lasts: a GitHub App token lasts eight hours, a session up to
 // 48. Another session may have rotated the token already; Refresh then
 // returns that one. A failure keeps the current credential and retries;
-// nothing prints, as the harness owns the terminal.
+// nothing prints, as the harness owns the terminal. A credential that never
+// expires within the session, such as a GitLab session PAT, only waits.
 func keepFresh(ctx context.Context, store *credentials, p provider.Provider, c provider.Credential) {
+	if c.Expires.IsZero() {
+		return
+	}
 	for {
 		wait := time.Until(c.Expires.Add(-refreshMargin))
 		if wait < refreshRetry {

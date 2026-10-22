@@ -22,7 +22,9 @@ type Scope struct {
 	Permissions []string `json:"permissions"`
 }
 type GitHubConfig struct {
-	Enabled      *bool    `json:"enabled,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+	// Optional is accepted and has no effect: a provider that fails never
+	// stops the session, which acquires its credentials in the background.
 	Optional     bool     `json:"optional,omitempty"`
 	ClientID     string   `json:"client_id"`
 	ExpectedUser string   `json:"expected_user"`
@@ -32,7 +34,8 @@ type GitHubConfig struct {
 	Owners []string `json:"owners,omitempty"`
 }
 type GitLabConfig struct {
-	Enabled          *bool    `json:"enabled,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+	// Optional is accepted and has no effect, as GitHubConfig's.
 	Optional         bool     `json:"optional,omitempty"`
 	ExpectedUser     string   `json:"expected_user"`
 	Issuer           string   `json:"issuer,omitempty"`

@@ -52,7 +52,7 @@ func TestConfigRejectsBroaderScopeAndMissingPaths(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("accepted trailing JSON")
 	}
-	// Optional skips only credentials that fail at start, never the checks.
+	// Optional is still accepted, without effect, and never skips the checks.
 	c = testConfig()
 	c.GitHub.Optional, c.GitLab.Optional = true, true
 	raw, _ = json.Marshal(c)

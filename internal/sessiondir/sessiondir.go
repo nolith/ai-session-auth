@@ -161,16 +161,18 @@ func (d *Dir) ReadFile(rel string) ([]byte, error) {
 // ledger is left to revoke.
 func (d *Dir) Remove() error { return os.RemoveAll(d.path) }
 
-// The states a provider's marker records. A provider without a marker is
-// still pending.
+// The states a provider's marker records: written pending when the session
+// is planned, then ready or failed once the background acquisition ends. A
+// provider without a marker is pending too.
 const (
-	Ready  = "ready"
-	Failed = "failed"
+	Pending = "pending"
+	Ready   = "ready"
+	Failed  = "failed"
 )
 
-// Marker is how far one provider got: its credential is in the directory and
-// its tools' configuration rendered, or it failed, for Reason. The reason is
-// shown to the harness, so it names no local path and no secret.
+// Marker is how far one provider got: still acquiring, its credential in the
+// directory and its tools' configuration rendered, or failed, for Reason. The
+// reason is shown to the harness, so it names no local path and no secret.
 type Marker struct {
 	State  string    `json:"state"`
 	Reason string    `json:"reason,omitempty"`
@@ -190,13 +192,15 @@ func ProviderFile(directory, provider string) (string, error) {
 	return directory + "/" + provider, nil
 }
 
+func validState(state string) bool { return state == Pending || state == Ready || state == Failed }
+
 // SetMarker records a provider's state.
 func (d *Dir) SetMarker(provider string, m Marker) error {
 	rel, err := ProviderFile("markers", provider)
 	if err != nil {
 		return err
 	}
-	if m.State != Ready && m.State != Failed {
+	if !validState(m.State) {
 		return errors.New("invalid marker state")
 	}
 	raw, err := json.Marshal(m)
@@ -218,7 +222,7 @@ func (d *Dir) Marker(provider string) (Marker, error) {
 		return Marker{}, err
 	}
 	var m Marker
-	if json.Unmarshal(raw, &m) != nil || (m.State != Ready && m.State != Failed) {
+	if json.Unmarshal(raw, &m) != nil || !validState(m.State) {
 		return Marker{}, errors.New("invalid marker")
 	}
 	return m, nil

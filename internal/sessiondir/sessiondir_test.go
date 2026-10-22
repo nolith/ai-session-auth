@@ -138,8 +138,14 @@ func TestMarkers(t *testing.T) {
 			t.Errorf("marker for %q", bad)
 		}
 	}
-	if err := d.SetMarker("ssh", Marker{State: "pending"}); err == nil {
+	if err := d.SetMarker("ssh", Marker{State: "waiting"}); err == nil {
 		t.Error("marker with an unknown state")
+	}
+	if err := d.SetMarker("ssh", Marker{State: Pending, Time: now}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := d.Marker("ssh"); err != nil || m.State != Pending {
+		t.Fatalf("%+v %v", m, err)
 	}
 }
 
