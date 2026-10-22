@@ -319,14 +319,26 @@ A session starts in this order, and the harness never waits for the network:
 
 Until a provider is ready, its tools see no credential:
 
-| Tool                     | Before the credential arrives                                                         |
-| :----------------------- | :------------------------------------------------------------------------------------ |
-| Git, through the helper  | `geas credential` waits up to 30 s for the provider's marker, then tells Git to quit, with the reason |
-| `glab`, `gh`             | not logged in; agents retry                                                           |
+| Tool                    | Before the credential arrives                                                                         |
+| :---------------------- | :---------------------------------------------------------------------------------------------------- |
+| Git, through the helper | `geas credential` waits up to 30 s for the provider's marker, then tells Git to quit, with the reason |
+| `glab`, `gh`            | not logged in; agents retry                                                                           |
 
 A GitLab mint takes about 3 s, so the helper's 30 s cover a slow network ten
 times over and still fail well inside an agent's tool timeout. A provider that
 failed makes the helper answer at once, with the reason.
+
+`geas status`, run inside a session, reads the markers and prints one line per
+provider:
+
+```console
+$ geas status
+github:github.com  failed: run github-login before starting a session
+gitlab:gitlab.com  ready
+```
+
+It exits 0 when every provider is ready, 1 when one failed, and 75
+(`EX_TEMPFAIL`, try again later) while one is still pending and none failed.
 
 Nothing is printed while the harness runs: a line would scribble over an
 agent's terminal. Failures go to the markers, and Git's credential helper
@@ -424,17 +436,17 @@ session before it starts.
 The session directory, owner-only (mode 700, every file mode 600, each
 replaced atomically):
 
-| File                            | Written by                                              | Read by                             |
-| :------------------------------ | :------------------------------------------------------ | :---------------------------------- |
-| `ledger`                        | the launcher, before each mint; the reaper              | the launcher and the reaper         |
-| `gitconfig`                     | the launcher, at start                                  | Git, through `include.path`         |
-| `git/hosts.json`                | the launcher, at start: hosts and allowlists            | `geas credential`                   |
-| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed | `geas credential`                   |
-| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason | `geas credential`         |
-| `glab/config.yml`               | the GitLab renderer, one entry per host                 | `glab`                              |
-| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                     | `gh`                                |
-| `sandbox/policy.json`           | the launcher, at start                                  | `geas sandbox check`                |
-| `sandbox/nono.json`             | the launcher, at start                                  | the sandbox, `GEAS_SANDBOX_PROFILE` |
+| File                            | Written by                                                        | Read by                             |
+| :------------------------------ | :---------------------------------------------------------------- | :---------------------------------- |
+| `ledger`                        | the launcher, before each mint; the reaper                        | the launcher and the reaper         |
+| `gitconfig`                     | the launcher, at start                                            | Git, through `include.path`         |
+| `git/hosts.json`                | the launcher, at start: hosts and allowlists                      | `geas credential`                   |
+| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed           | `geas credential`                   |
+| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason | `geas credential`, `geas status`    |
+| `glab/config.yml`               | the GitLab renderer, one entry per host                           | `glab`                              |
+| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                               | `gh`                                |
+| `sandbox/policy.json`           | the launcher, at start                                            | `geas sandbox check`                |
+| `sandbox/nono.json`             | the launcher, at start                                            | the sandbox, `GEAS_SANDBOX_PROFILE` |
 
 `<provider>` is a provider's ID, such as `gitlab:gitlab.com`. `glab` and `gh`
 may write their own files into their directories; a renderer replaces its
@@ -531,7 +543,7 @@ allowlists, the session directory (modes, atomic writes, markers), the glab,
 gh, gitconfig, sandbox policy and nono renderers against golden files, the
 `Setup.Env` merge, each tool's configuration directory per override and per
 OS, the Git credential helper with real Git, the sandbox check, the GitHub
-refresh and its markers with a fake clock, exit codes, process-group timeouts, revocation after SIGHUP with the
+refresh and its markers with a fake clock, `geas status`, exit codes, process-group timeouts, revocation after SIGHUP with the
 output gone, the ledger, the reaper after SIGKILL (also during the mint,
 finding the PAT by name) and its silence after a clean exit, nested sessions,
 cancellable issuer input, the harness starting before any provider step,

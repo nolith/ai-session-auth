@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"github.com/nolith/geas/internal/api"
@@ -30,6 +32,8 @@ Commands:
   run -- HARNESS [ARGS...]       Start a session with user credentials; inside a
                                 session, run HARNESS in it
   credential get                Git's credential helper, inside a session
+  status                        Inside a session: each provider's credential, pending,
+                                ready or failed with the reason
   sandbox check                 Inside a session: check that no protected path is
                                 readable and that the session directory is
 
@@ -47,6 +51,12 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		return 0, credhelper.Run(args[1], os.Stdin, os.Stdout)
 	}
 	// Run inside a session, as `geas credential` is.
+	if len(args) > 0 && args[0] == "status" {
+		if len(args) != 1 {
+			return 2, errors.New("usage: geas status")
+		}
+		return status(os.Stdout)
+	}
 	if len(args) > 0 && args[0] == "sandbox" {
 		if len(args) != 2 || args[1] != "check" {
 			return 2, errors.New("usage: geas sandbox check")
@@ -133,6 +143,48 @@ func sandboxCheck(output io.Writer) (int, error) {
 		return 1, err
 	}
 	return 0, nil
+}
+
+// statusPending is geas status's exit code when no provider failed but some
+// are still pending: EX_TEMPFAIL, try again later.
+const statusPending = 75
+
+// status prints each provider's marker for the session GEAS_SESSION_DIR
+// names, one line each, and exits 0 when all are ready, 1 when one failed,
+// and statusPending while one is still pending.
+func status(output io.Writer) (int, error) {
+	dir, err := sessiondir.FromEnv()
+	if err != nil {
+		return 1, err
+	}
+	markers, err := dir.Markers()
+	if err != nil {
+		return 1, err
+	}
+	ids := slices.Sorted(maps.Keys(markers))
+	width := 0
+	for _, id := range ids {
+		width = max(width, len(id))
+	}
+	code := 0
+	for _, id := range ids {
+		m := markers[id]
+		line := fmt.Sprintf("%-*s  %s", width, id, m.State)
+		switch m.State {
+		case sessiondir.Failed:
+			line += ": " + m.Reason
+			code = 1
+		case sessiondir.Pending:
+			if code == 0 {
+				code = statusPending
+			}
+		}
+		fmt.Fprintln(output, line)
+	}
+	if len(ids) == 0 {
+		fmt.Fprintln(output, "no providers in this session")
+	}
+	return code, nil
 }
 
 // sessionContext ends on Ctrl-C, SIGTERM, or SIGHUP from a closed terminal or

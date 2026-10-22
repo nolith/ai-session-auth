@@ -147,6 +147,12 @@ func TestMarkers(t *testing.T) {
 	if m, err := d.Marker("ssh"); err != nil || m.State != Pending {
 		t.Fatalf("%+v %v", m, err)
 	}
+	// All of them, without a write in progress.
+	os.WriteFile(filepath.Join(d.Path(), "markers", ".auth-123"), []byte("{"), 0600)
+	markers, err := d.Markers()
+	if err != nil || len(markers) != 3 || markers["gitlab:gitlab.com"].State != Failed || markers["github:github.com"].State != Ready || markers["ssh"].State != Pending {
+		t.Fatalf("%+v %v", markers, err)
+	}
 }
 
 func TestRemove(t *testing.T) {

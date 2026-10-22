@@ -210,6 +210,32 @@ func (d *Dir) SetMarker(provider string, m Marker) error {
 	return d.WriteFile(rel, raw)
 }
 
+// Markers returns every provider's marker, by provider ID: the session
+// writes one per provider before the harness starts.
+func (d *Dir) Markers() (map[string]Marker, error) {
+	path, err := d.Join("markers")
+	if err != nil {
+		return nil, err
+	}
+	files, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	markers := map[string]Marker{}
+	for _, file := range files {
+		// Skips the temporary files of a write in progress.
+		if !providerID.MatchString(file.Name()) {
+			continue
+		}
+		m, err := d.Marker(file.Name())
+		if err != nil {
+			return nil, err
+		}
+		markers[file.Name()] = m
+	}
+	return markers, nil
+}
+
 // Marker returns a provider's state; an error wrapping os.ErrNotExist means
 // it is still pending.
 func (d *Dir) Marker(provider string) (Marker, error) {

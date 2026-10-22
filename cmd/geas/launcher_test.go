@@ -37,8 +37,8 @@ func TestMain(m *testing.M) {
 		main()
 	}
 	// The launcher's own re-executions: the reaper, and Git's credential
-	// helper.
-	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential") {
+	// helper; and geas status, which a harness runs as $GEAS_TEST_BINARY.
+	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential" || os.Args[1] == "status") {
 		main()
 	}
 	os.Exit(m.Run())
@@ -74,7 +74,7 @@ func launch(t *testing.T, script string, env ...string) *testSession {
 	}
 	s.output = read
 	s.launcher = exec.Command(os.Args[0])
-	s.launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state)
+	s.launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+s.glab+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+s.state, "GEAS_TEST_BINARY="+os.Args[0])
 	s.launcher.Env = append(s.launcher.Env, env...)
 	s.launcher.Stdout, s.launcher.Stderr = write, write
 	if err = s.launcher.Start(); err != nil {
@@ -258,7 +258,8 @@ printf 'marker=%s\n' "$(cat "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com")"
 grep -c 'token: "session-secret"' "$GLAB_CONFIG_DIR/config.yml"
 ls -ld "$GEAS_SESSION_DIR" "$GLAB_CONFIG_DIR/config.yml" | cut -c1-10
 printf 'profile=%s\n' "$GEAS_SANDBOX_PROFILE"
-grep -c '"bypass_protection"' "$GEAS_SANDBOX_PROFILE"`)
+grep -c '"bypass_protection"' "$GEAS_SANDBOX_PROFILE"
+"$GEAS_TEST_BINARY" status; echo "status exit $?"`)
 	raw, _ := io.ReadAll(s.output)
 	s.wait(t)
 	output := string(raw)
@@ -267,7 +268,7 @@ grep -c '"bypass_protection"' "$GEAS_SANDBOX_PROFILE"`)
 		t.Fatalf("session directories left: %v", left)
 	}
 	dir := filepath.Join(s.state, "geas", "sessions")
-	for _, want := range []string{"\ndir=" + dir + "/", "\nglab=" + dir + "/", "/glab\n", "\nsecret=session-secret\n", `marker={"state":"ready"`, "\n1\n", "drwx------\n-rw-------\n", "/sandbox/nono.json\n1\n"} {
+	for _, want := range []string{"\ndir=" + dir + "/", "\nglab=" + dir + "/", "/glab\n", "\nsecret=session-secret\n", `marker={"state":"ready"`, "\n1\n", "drwx------\n-rw-------\n", "/sandbox/nono.json\n1\n", "\ngitlab:gitlab.com  ready\nstatus exit 0\n"} {
 		if !strings.Contains("\n"+output, want) {
 			t.Errorf("harness output lacks %q:\n%s", want, output)
 		}
@@ -399,7 +400,7 @@ func failingSession(t *testing.T, optional bool, script string) (string, int, st
 	}
 	args, _ := json.Marshal([]string{"--config", configPath, "run", "--", "/bin/sh", "-c", script})
 	launcher := exec.Command(os.Args[0])
-	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1")
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_STATE_HOME="+t.TempDir(), "FAKE_GLAB_FAIL=1", "GEAS_TEST_BINARY="+os.Args[0])
 	output, err := launcher.CombinedOutput()
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {
@@ -417,6 +418,7 @@ func TestFailingProvidersNeverStopTheStart(t *testing.T) {
 	script := `until grep -qs failed "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com" && grep -qs failed "$GEAS_SESSION_DIR/markers/github:github.com"; do sleep 0.02; done
 echo harness started
 cat "$GEAS_SESSION_DIR/markers/github:github.com"; echo
+"$GEAS_TEST_BINARY" status; echo "status exit $?"
 gh api user; echo "gh exit $?"
 case "$GLAB_CONFIG_DIR" in "$GEAS_SESSION_DIR"/glab) echo "glab configured in the session" ;; esac
 [ -e "$GLAB_CONFIG_DIR/config.yml" ] || echo "no glab token"
@@ -431,6 +433,7 @@ echo harness done`
 		}
 		for _, want := range []string{
 			`{"state":"failed","reason":"run github-login before starting a session","time":`,
+			"github:github.com  failed: run github-login before starting a session\ngitlab:gitlab.com  failed: glab issuer request failed\nstatus exit 1\n",
 			"gh exit 0\n",
 			"glab configured in the session\n",
 			"no glab token\n",

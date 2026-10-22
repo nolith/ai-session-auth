@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nolith/geas/internal/sandbox"
+	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/testutil"
 )
 
@@ -54,5 +56,47 @@ func TestSandboxCheck(t *testing.T) {
 	}
 	if code, err := execute(context.Background(), []string{"sandbox"}, nil); code != 2 || err == nil {
 		t.Fatalf("no subcommand: %d %v", code, err)
+	}
+}
+
+// geas status lists every provider's marker, and its exit code says whether
+// all are ready, one failed, or one is still pending.
+func TestStatus(t *testing.T) {
+	dir := testutil.SessionDir(t)
+	t.Setenv("GEAS_SESSION_DIR", dir.Path())
+	now := time.Now()
+	set := func(id, state, reason string) {
+		t.Helper()
+		if err := dir.SetMarker(id, sessiondir.Marker{State: state, Reason: reason, Time: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set("gitlab:gitlab.com", sessiondir.Pending, "")
+	set("github:github.com", sessiondir.Pending, "")
+	for _, tc := range []struct {
+		id, state, reason string
+		code              int
+		want              string
+	}{
+		{"", "", "", 75, "github:github.com  pending\ngitlab:gitlab.com  pending\n"},
+		{"gitlab:gitlab.com", sessiondir.Ready, "", 75, "github:github.com  pending\ngitlab:gitlab.com  ready\n"},
+		{"github:github.com", sessiondir.Ready, "", 0, "github:github.com  ready\ngitlab:gitlab.com  ready\n"},
+		{"github:github.com", sessiondir.Failed, "run github-login before starting a session", 1, "github:github.com  failed: run github-login before starting a session\ngitlab:gitlab.com  ready\n"},
+		{"gitlab:gitlab.com", sessiondir.Pending, "", 1, "github:github.com  failed: run github-login before starting a session\ngitlab:gitlab.com  pending\n"},
+	} {
+		if tc.id != "" {
+			set(tc.id, tc.state, tc.reason)
+		}
+		var out bytes.Buffer
+		if code, err := status(&out); code != tc.code || err != nil || out.String() != tc.want {
+			t.Errorf("after %s %s: exit %d %v:\n%s", tc.id, tc.state, code, err, out.String())
+		}
+	}
+	if code, err := execute(context.Background(), []string{"status", "extra"}, nil); code != 2 || err == nil {
+		t.Fatalf("with an argument: %d %v", code, err)
+	}
+	t.Setenv("GEAS_SESSION_DIR", "")
+	if code, err := execute(context.Background(), []string{"status"}, nil); code != 1 || err == nil || !strings.Contains(err.Error(), "not inside a geas session") {
+		t.Fatalf("outside a session: %d %v", code, err)
 	}
 }
