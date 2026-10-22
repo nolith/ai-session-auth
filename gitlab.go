@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -432,22 +431,48 @@ func namespacedScopes(c GitLabConfig, resourceIDs []string) []Scope {
 	}
 	return scopes
 }
+
+// findDocument builds the id lookup for one PAT name. The name is written into
+// the document for the same reason as the lookup paths: the glab issuer cannot
+// carry the scalar a $name variable would need.
+func findDocument(name string) string {
+	return fmt.Sprintf("query SessionPAT {\n  currentUser { personalAccessTokens(search: %s) { nodes { id name } } }\n}\n", graphqlString(name))
+}
+
+// find resolves a PAT's numeric ID by name, for the revocation: the mutation
+// returns no ID. A name that matches more than one token is refused.
 func (g *GitLab) find(ctx context.Context, name string) (int64, error) {
-	query := url.Values{"search": {name}, "per_page": {"100"}}.Encode()
-	var matches []struct {
-		ID   int64  `json:"id"`
-		Name string `json:"name"`
+	var answer struct {
+		Errors []any `json:"errors"`
+		Data   struct {
+			CurrentUser struct {
+				PersonalAccessTokens struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"personalAccessTokens"`
+			} `json:"currentUser"`
+		} `json:"data"`
 	}
-	if err := g.Issuer.rest(ctx, http.MethodGet, "personal_access_tokens?"+query, &matches); err != nil {
+	if err := g.Issuer.graphql(ctx, findDocument(name), map[string]any{}, &answer); err != nil {
 		return 0, err
+	}
+	if len(answer.Errors) > 0 {
+		return 0, errors.New("GitLab id lookup query failed")
 	}
 	var id int64
 	count := 0
-	for _, match := range matches {
-		if match.Name == name {
-			id = match.ID
-			count++
+	for _, match := range answer.Data.CurrentUser.PersonalAccessTokens.Nodes {
+		if match.Name != name {
+			continue
 		}
+		numeric, err := parseGlobalID(match.ID, "PersonalAccessToken")
+		if err != nil {
+			return 0, errors.New("cannot uniquely resolve session PAT for revocation")
+		}
+		id = numeric
+		count++
 	}
 	if count != 1 || id <= 0 {
 		return 0, errors.New("cannot uniquely resolve session PAT for revocation")

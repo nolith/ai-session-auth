@@ -84,12 +84,44 @@ func mintAnswer() map[string]any {
 	return map[string]any{"data": map[string]any{"personalAccessTokenCreate": map[string]any{"token": "session-secret", "errors": []string{}}}}
 }
 
-// lookupRequest answers the lookup document for a test's API, and reports
-// whether the request was the mint instead.
-func lookupRequest(t *testing.T, query, user string, answers map[string]any, ids []any) (minted bool, answer any) {
+// patSearch matches the inlined name of the id lookup document.
+var patSearch = regexp.MustCompile(`personalAccessTokens\(search: ("(?:[^"\\]|\\.)*")\)`)
+
+// patName reads the name the id lookup asks for.
+func patName(t *testing.T, query string) string {
 	t.Helper()
-	if strings.Contains(query, "personalAccessTokenCreate") {
+	match := patSearch.FindStringSubmatch(query)
+	if match == nil {
+		t.Fatalf("the document searches for a PAT in %s", query)
+	}
+	var name string
+	if err := json.Unmarshal([]byte(match[1]), &name); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// patAnswer answers the id lookup as a search does: the token asked for, among
+// another whose name merely starts the same way.
+func patAnswer(t *testing.T, query string) map[string]any {
+	t.Helper()
+	name := patName(t, query)
+	return map[string]any{"data": map[string]any{"currentUser": map[string]any{"personalAccessTokens": map[string]any{"nodes": []any{
+		map[string]any{"id": "gid://gitlab/PersonalAccessToken/99", "name": name + "-other"},
+		map[string]any{"id": "gid://gitlab/PersonalAccessToken/42", "name": name},
+	}}}}}
+}
+
+// issuerAnswer answers every document the issuer sends as GitLab would: the
+// lookup, the id lookup, and the mint. It reports the mint, so the caller can
+// read the input whose name and scopes it wants to check.
+func issuerAnswer(t *testing.T, query, user string, answers map[string]any, ids []any) (minted bool, answer any) {
+	t.Helper()
+	switch {
+	case strings.Contains(query, "personalAccessTokenCreate"):
 		return true, mintAnswer()
+	case strings.Contains(query, "personalAccessTokens(search:"):
+		return false, patAnswer(t, query)
 	}
 	return false, map[string]any{"data": lookupAnswers(t, query, user, answers, ids)}
 }
@@ -301,7 +333,11 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 		switch {
 		case r.URL.Path == "/api/graphql":
 			query, variables := graphqlPayload(t, r)
-			minted, answer := lookupRequest(t, query, "alice", nil, ids)
+			// The id lookup must ask for the PAT the mint created.
+			if strings.Contains(query, "personalAccessTokens(search:") && patName(t, query) != name {
+				t.Errorf("the id lookup asks for %q, the session PAT is %q", patName(t, query), name)
+			}
+			minted, answer := issuerAnswer(t, query, "alice", nil, ids)
 			if !minted {
 				return 200, answer
 			}
@@ -318,11 +354,6 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 				t.Error("bad PAT input")
 			}
 			return 200, answer
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/personal_access_tokens":
-			if r.URL.Query().Get("search") != name {
-				t.Error("bad search")
-			}
-			return 200, []map[string]any{{"id": 99, "name": name + "-other"}, {"id": 42, "name": name}}
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v4/personal_access_tokens/42":
 			deleted = true
 			return 204, nil
@@ -348,7 +379,7 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
-		minted, answer = lookupRequest(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
+		minted, answer = issuerAnswer(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
 		return 200, answer
 	})
 	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
@@ -361,7 +392,7 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
-		minted, answer = lookupRequest(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
+		minted, answer = issuerAnswer(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
 		return 200, answer
 	})
 	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
@@ -410,6 +441,11 @@ case "$method $last" in
 " input="*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
 " query="*)
 	case "$last" in
+	*personalAccessTokens*)
+		name=$(printf '%s' "$last" | sed -n 's/.*search: "\([^"]*\)".*/\1/p')
+		printf '%s' "$name" >"$log/name"
+		printf '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[{"id":"gid://gitlab/PersonalAccessToken/99","name":"%s-other"},{"id":"gid://gitlab/PersonalAccessToken/42","name":"%s"}]}}}}\n' "$name" "$name"
+		;;
 	*"projects(ids:"*)
 		echo '{"data":{"currentUser":{"username":"alice"},"l0":{"nodes":[{"id":"gid://gitlab/Project/42","fullPath":"group/project"}]}}}'
 		;;
@@ -418,12 +454,6 @@ case "$method $last" in
 		exit 1
 		;;
 	esac
-	;;
-"GET personal_access_tokens?"*)
-	name=${last##*search=}
-	name=${name%%&*}
-	printf '%s' "$name" >"$log/name"
-	printf '[{"id":99,"name":"%s-other"},{"id":42,"name":"%s"}]\n' "$name" "$name"
 	;;
 "GET personal_access_tokens/42")
 	active=true
@@ -516,8 +546,8 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	if !strings.HasPrefix(name, "geas-") || input.ExpiresAt != "2026-10-10" || len(input.Scopes) != 2 || input.Scopes[1].ResourceIDs[0] != "gid://gitlab/Project/42" {
 		t.Errorf("bad PAT input %+v", input)
 	}
-	if !slices.Equal(calls[2][3:], []string{"--method", "GET", "personal_access_tokens?per_page=100&search=" + name}) {
-		t.Errorf("search: %q", calls[2])
+	if !slices.Equal(calls[2][3:], []string{"graphql", "-f", "query=" + findDocument(name)}) {
+		t.Errorf("id lookup: %q", calls[2])
 	}
 	if !slices.Equal(calls[3][3:], []string{"--method", "DELETE", "personal_access_tokens/42"}) {
 		t.Errorf("revocation: %q", calls[3])
@@ -697,7 +727,10 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/graphql":
 			query, variables := graphqlPayload(t, r)
-			minted, answer := lookupRequest(t, query, "alice", answers, nil)
+			if strings.Contains(query, "personalAccessTokens(search:") {
+				return 200, patAnswer(t, query)
+			}
+			minted, answer := issuerAnswer(t, query, "alice", answers, nil)
 			if !minted {
 				lookups++
 				return 200, answer
@@ -760,7 +793,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		api := mockAPI(t, func(r *http.Request) (int, any) {
 			query, _ := graphqlPayload(t, r)
 			var answer any
-			minted, answer = lookupRequest(t, query, "alice", map[string]any{"group": tc.answer}, nil)
+			minted, answer = issuerAnswer(t, query, "alice", map[string]any{"group": tc.answer}, nil)
 			return 200, answer
 		})
 		c := namespacedConfig()
