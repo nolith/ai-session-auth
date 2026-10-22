@@ -66,7 +66,8 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // is answered as gitlab.com would for alice and group/project (ID 42). The id
 // lookup finds only the names the mutation minted. With FAKE_GLAB_BLOCK set,
 // the mutation mints, creates "mutation" and waits for a "release" file
-// before it answers, as a slow mint would.
+// before it answers, as a slow mint would; FAKE_GLAB_DELAY makes it answer
+// that many seconds later.
 func FakeGlab(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -95,6 +96,7 @@ case "$method $last" in
 	name=$(printf '%s' "$last" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
 	printf '%s\n' "$name" >>"$log/minted"
 	printf '%s' "$name" >"$log/name"
+	[ -n "${FAKE_GLAB_DELAY-}" ] && sleep "$FAKE_GLAB_DELAY"
 	if [ -n "${FAKE_GLAB_BLOCK-}" ]; then
 		touch "$log/mutation"
 		while [ ! -e "$log/release" ]; do sleep 0.05; done

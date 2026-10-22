@@ -57,7 +57,8 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
   run, from wherever `PATH` finds them, with the session's credentials in
   their own configuration files. No wrappers, no `PATH` changes.
 - A Git credential helper, `geas credential`, that checks protocol, hostname,
-  and repository path, and answers from the session directory.
+  and repository path, and answers from the session directory, waiting
+  briefly for a credential still on its way.
 - SSH-to-HTTPS URL rewriting through a session gitconfig, included last from
   the process environment; your Git configuration on disk is unchanged.
 - GitLab PAT revocation on normal exit, Ctrl-C, SIGTERM, SIGHUP (a closed
@@ -316,6 +317,17 @@ A session starts in this order, and the harness never waits for the network:
    PAT's name, which is enough to revoke it. GitHub's token is refreshed in
    the background from then on.
 
+Until a provider is ready, its tools see no credential:
+
+| Tool                     | Before the credential arrives                                                         |
+| :----------------------- | :------------------------------------------------------------------------------------ |
+| Git, through the helper  | `geas credential` waits up to 30 s for the provider's marker, then tells Git to quit, with the reason |
+| `glab`, `gh`             | not logged in; agents retry                                                           |
+
+A GitLab mint takes about 3 s, so the helper's 30 s cover a slow network ten
+times over and still fail well inside an agent's tool timeout. A provider that
+failed makes the helper answer at once, with the reason.
+
 Nothing is printed while the harness runs: a line would scribble over an
 agent's terminal. Failures go to the markers, and Git's credential helper
 reports them. A provider that failed stays unavailable for the session.
@@ -521,7 +533,8 @@ refresh, exit codes, process-group timeouts, revocation after SIGHUP with the
 output gone, the ledger, the reaper after SIGKILL (also during the mint,
 finding the PAT by name) and its silence after a clean exit, nested sessions,
 cancellable issuer input, the harness starting before any provider step,
-a harness exiting during the mint, one glab lock across hosts, and failing
+a harness exiting during the mint, Git waiting in the helper for a slow
+issuer and failing fast with a failing one, one glab lock across hosts, and failing
 providers that never stop the start while Git refuses.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:

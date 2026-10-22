@@ -61,11 +61,72 @@ func TestGet(t *testing.T) {
 			t.Errorf("%q: %q %v", tc.request, out.String(), err)
 		}
 	}
-	// Still pending: a provider without a marker never falls through.
-	os.Remove(filepath.Join(dir.Path(), "markers", "gitlab:gitlab.com"))
+}
+
+// waitFor sets the helper's wait for one test.
+func waitFor(t *testing.T, wait time.Duration) {
+	t.Helper()
+	before, poll := markerWait, markerPoll
+	markerWait, markerPoll = wait, 5*time.Millisecond
+	t.Cleanup(func() { markerWait, markerPoll = before, poll })
+}
+
+// A pending provider holds Git until its marker turns: the credential
+// arrives in the background, after the harness started.
+func TestGetWaitsForAPendingProvider(t *testing.T) {
+	waitFor(t, 10*time.Second)
+	request := "protocol=https\nhost=gitlab.com\npath=group/project\n"
+	for _, tc := range []struct {
+		name   string
+		marker sessiondir.Marker
+		want   string
+		err    string
+	}{
+		{"ready", sessiondir.Marker{State: sessiondir.Ready}, "username=oauth2\npassword=glpat-session\n\n", "<nil>"},
+		{"failed", sessiondir.Marker{State: sessiondir.Failed, Reason: "glab issuer request failed"}, "quit=1\n\n", "gitlab.com is not available in this session: glab issuer request failed"},
+	} {
+		dir := session(t)
+		if err := dir.SetMarker("gitlab:gitlab.com", sessiondir.Marker{State: sessiondir.Pending, Time: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			dir.SetMarker("gitlab:gitlab.com", tc.marker)
+		}()
+		var out bytes.Buffer
+		started := time.Now()
+		err := Get(dir, strings.NewReader(request), &out)
+		if out.String() != tc.want || fmt.Sprint(err) != tc.err {
+			t.Errorf("%s: %q %v", tc.name, out.String(), err)
+		}
+		if waited := time.Since(started); waited < 100*time.Millisecond || waited > 5*time.Second {
+			t.Errorf("%s: answered after %s", tc.name, waited)
+		}
+	}
+}
+
+// A failed provider answers at once; one still pending at the end of the
+// wait, or without a marker at all, makes Git quit, never fall through.
+func TestGetGivesUp(t *testing.T) {
+	waitFor(t, 10*time.Second)
+	dir := session(t)
 	var out bytes.Buffer
-	if err := Get(dir, strings.NewReader("protocol=https\nhost=gitlab.com\npath=group/project\n"), &out); err == nil || out.String() != "quit=1\n\n" || !strings.Contains(err.Error(), "not ready") {
-		t.Fatalf("pending: %q %v", out.String(), err)
+	started := time.Now()
+	if err := Get(dir, strings.NewReader("protocol=https\nhost=github.com\npath=nolith/geas\n"), &out); err == nil || out.String() != "quit=1\n\n" || time.Since(started) > time.Second {
+		t.Fatalf("failed: %q %v after %s", out.String(), err, time.Since(started))
+	}
+	waitFor(t, 50*time.Millisecond)
+	for _, pending := range []bool{true, false} {
+		if pending {
+			dir.SetMarker("gitlab:gitlab.com", sessiondir.Marker{State: sessiondir.Pending, Time: time.Now()})
+		} else {
+			os.Remove(filepath.Join(dir.Path(), "markers", "gitlab:gitlab.com"))
+		}
+		out.Reset()
+		err := Get(dir, strings.NewReader("protocol=https\nhost=gitlab.com\npath=group/project\n"), &out)
+		if err == nil || out.String() != "quit=1\n\n" || err.Error() != "gitlab.com credentials are still pending after 50ms; see geas status" {
+			t.Errorf("pending (marker %v): %q %v", pending, out.String(), err)
+		}
 	}
 }
 

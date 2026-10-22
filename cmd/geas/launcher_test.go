@@ -522,6 +522,44 @@ func TestHarnessExitDuringMintRevokes(t *testing.T) {
 	}
 }
 
+// fill asks Git for gitlab.com's credential, as a push would, the moment the
+// harness starts.
+const fill = `printf 'protocol=https\nhost=gitlab.com\npath=group/project.git\n\n' | git credential fill; echo "fill exit $?"`
+
+// Git asking right after the start, while the mint is still on its way,
+// waits for it in the helper and gets the session PAT.
+func TestGitWaitsForASlowIssuer(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	s := launch(t, `cat "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com"; echo; `+fill, "FAKE_GLAB_DELAY=1")
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	output := string(raw)
+	if !strings.Contains(output, `{"state":"pending"`) || !strings.Contains(output, "username=oauth2\npassword=session-secret\n") || !strings.Contains(output, "fill exit 0\n") {
+		t.Fatalf("harness output:\n%s", output)
+	}
+}
+
+// With an issuer that fails, the same request fails as soon as the marker
+// says so, with the reason, long before the helper's wait is over.
+func TestGitFailsFastForAFailingIssuer(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	started := time.Now()
+	s := launch(t, fill, "FAKE_GLAB_FAIL=1")
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	output := string(raw)
+	if !strings.Contains(output, "gitlab.com is not available in this session: glab issuer request failed") || !strings.Contains(output, "fill exit 128\n") || strings.Contains(output, "password=") {
+		t.Fatalf("harness output:\n%s", output)
+	}
+	if took := time.Since(started); took > 10*time.Second {
+		t.Fatalf("the helper waited %s", took)
+	}
+}
+
 // Inside a session, `geas run` runs the command in place, sharing the
 // session: no configuration is read, nothing is minted.
 func TestNestedRunSharesTheSession(t *testing.T) {

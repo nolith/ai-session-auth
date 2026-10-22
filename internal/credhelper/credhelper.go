@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/sessiondir"
@@ -79,9 +80,10 @@ func Run(operation string, input io.Reader, output io.Writer) error {
 
 // Get answers one Git credential request from dir. Outside the allowlist,
 // or for another protocol or host, it answers nothing, and Git, with no other
-// helper and no prompt, fails. For a provider that failed or is not ready it
-// tells Git to quit, with the reason, so that nothing falls back to the
-// user's own credentials.
+// helper and no prompt, fails. For a provider still pending it waits, up to
+// markerWait; for one that failed, or is still not ready, it tells Git to
+// quit, with the reason, so that nothing falls back to the user's own
+// credentials.
 func Get(dir *sessiondir.Dir, input io.Reader, output io.Writer) error {
 	request, err := readRequest(input)
 	if err != nil {
@@ -107,14 +109,12 @@ func Get(dir *sessiondir.Dir, input io.Reader, output io.Writer) error {
 	if host == nil || !host.gitHost().Allows(request["path"]) {
 		return nil
 	}
-	marker, err := dir.Marker(host.Provider)
+	marker, err := waitMarker(dir, host.Provider)
 	switch {
-	case errors.Is(err, os.ErrNotExist):
-		// Background acquisition will wait here for the marker, briefly,
-		// before giving up.
-		return quit(output, host.Host+" credentials are not ready in this session")
 	case err != nil:
 		return err
+	case marker.State == sessiondir.Pending:
+		return quit(output, fmt.Sprintf("%s credentials are still pending after %s; see geas status", host.Host, markerWait))
 	case marker.State != sessiondir.Ready:
 		return quit(output, host.Host+" is not available in this session: "+marker.Reason)
 	}
@@ -131,6 +131,30 @@ func Get(dir *sessiondir.Dir, input io.Reader, output io.Writer) error {
 	}
 	_, err = fmt.Fprintf(output, "username=%s\npassword=%s\n\n", host.Username, secret)
 	return err
+}
+
+// markerWait is how long the helper waits for a pending provider: a GitLab
+// mint takes about 3 s, so 30 s covers a slow network ten times over and
+// still fails well inside an agent's tool timeout. markerPoll is how often
+// it looks. Variables for the tests only.
+var markerWait, markerPoll = 30 * time.Second, 50 * time.Millisecond
+
+// waitMarker returns provider's marker once it is no longer pending, or the
+// pending one after markerWait: the session acquires credentials in the
+// background, and Git, unlike glab or an agent, cannot retry on its own. A
+// provider without a marker yet is pending too.
+func waitMarker(dir *sessiondir.Dir, provider string) (sessiondir.Marker, error) {
+	deadline := time.Now().Add(markerWait)
+	for {
+		marker, err := dir.Marker(provider)
+		if errors.Is(err, os.ErrNotExist) {
+			marker, err = sessiondir.Marker{State: sessiondir.Pending}, nil
+		}
+		if err != nil || marker.State != sessiondir.Pending || !time.Now().Before(deadline) {
+			return marker, err
+		}
+		time.Sleep(markerPoll)
+	}
 }
 
 // quit tells Git to stop at once, with no askpass or terminal prompt, and
