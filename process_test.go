@@ -18,11 +18,12 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/testutil"
 )
 
 func TestBrokerRepositoryBoundaries(t *testing.T) {
 	now := time.Now()
-	b := &Broker{Config: testConfig(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }, GitLabToken: "gl-test"}
+	b := &Broker{Config: testutil.Config(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }, GitLabToken: "gl-test"}
 	for _, tc := range []struct{ host, path, protocol, want string }{
 		{"github.com", "/ALICE/repo.git", "https", "ghu_test"},
 		{"gitlab.com", "group/project.git", "https", "gl-test"},
@@ -65,7 +66,7 @@ func TestCredentialProtocol(t *testing.T) {
 }
 func TestBrokerSkippedProviders(t *testing.T) {
 	now := time.Now()
-	b := &Broker{Config: testConfig(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubSkipped: "no login", GitLabSkipped: "issuer failed"}
+	b := &Broker{Config: testutil.Config(), Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubSkipped: "no login", GitLabSkipped: "issuer failed"}
 	for _, tc := range []struct {
 		request BrokerRequest
 		want    string
@@ -99,7 +100,7 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	dir := t.TempDir()
 	binary := "/tmp/test 'auth'"
 	base := append(os.Environ(), "GH_TOKEN=old-secret", "GITLAB_TOKEN=old-secret", "SSH_AUTH_SOCK=old-socket", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=Alice")
-	values, err := sessionEnvironment(testConfig(), dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil })
+	values, err := sessionEnvironment(testutil.Config(), dir, "/tmp/broker.sock", binary, base, func(cli string) (string, error) { return "/usr/bin/" + cli, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 }
 func TestBrokerSocketRPC(t *testing.T) {
 	now := time.Now()
-	b := &Broker{Config: testConfig(), Now: time.Now, Deadline: now.Add(time.Hour), GitLabToken: "test-secret"}
+	b := &Broker{Config: testutil.Config(), Now: time.Now, Deadline: now.Add(time.Hour), GitLabToken: "test-secret"}
 	// Keep socket paths below the macOS UNIX-domain path length limit.
 	dir, err := os.MkdirTemp("/tmp", "auth-test-")
 	if err != nil {
@@ -227,8 +228,8 @@ func TestIssuerReadCancellation(t *testing.T) {
 }
 func TestBrokerGitLabNamespaces(t *testing.T) {
 	now := time.Now()
-	c := testConfig()
-	c.GitLab = namespacedConfig()
+	c := testutil.Config()
+	c.GitLab = testutil.NamespacedConfig()
 	b := &Broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitLabToken: "gl-test"}
 	for _, tc := range []struct {
 		path string
@@ -264,7 +265,7 @@ func TestBrokerGitLabNamespaces(t *testing.T) {
 
 func TestBrokerGitHubOwners(t *testing.T) {
 	now := time.Now()
-	c := testConfig()
+	c := testutil.Config()
 	c.GitHub.Owners = []string{"nolith", "Some-Org"}
 	b := &Broker{Config: c, Now: func() time.Time { return now }, Deadline: now.Add(time.Hour), GitHubToken: func(context.Context) (string, error) { return "ghu_test", nil }}
 	for _, tc := range []struct {
@@ -336,9 +337,9 @@ type testSession struct {
 // script, which runs under /bin/sh, and returns once the harness has started.
 func startSession(t *testing.T, script string) *testSession {
 	t.Helper()
-	s := &testSession{glab: fakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
+	s := &testSession{glab: testutil.FakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
-	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: boolPointer(false)}, GitLab: glabConfig()}
+	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: testutil.Bool(false)}, GitLab: testutil.GlabConfig()}
 	raw, _ := json.Marshal(c)
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, raw, 0600); err != nil {
@@ -431,7 +432,7 @@ func waitReaper(t *testing.T, s *testSession) {
 }
 func deletes(t *testing.T, s *testSession) (count int, checked bool) {
 	t.Helper()
-	for _, call := range fakeGlabCalls(t, s.glab) {
+	for _, call := range testutil.Calls(t, s.glab) {
 		switch {
 		case slices.Equal(call[3:], []string{"--method", "DELETE", "personal_access_tokens/42"}):
 			count++
@@ -541,7 +542,7 @@ func TestKilledLauncherIsReaped(t *testing.T) {
 // fake glab.
 func shimSession(t *testing.T, shim string) (string, string, error) {
 	t.Helper()
-	real := fakeGlab(t)
+	real := testutil.FakeGlab(t)
 	shims := t.TempDir()
 	if err := os.WriteFile(filepath.Join(shims, "glab"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
@@ -554,7 +555,7 @@ func shimSession(t *testing.T, shim string) (string, string, error) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	address := filepath.Join(dir, "broker.sock")
 	now := time.Now()
-	server, err := startBroker(context.Background(), address, &Broker{Config: testConfig(), Now: time.Now, Deadline: now.Add(time.Hour), GitLabToken: "session-secret"})
+	server, err := startBroker(context.Background(), address, &Broker{Config: testutil.Config(), Now: time.Now, Deadline: now.Add(time.Hour), GitLabToken: "session-secret"})
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 		t.Skip("runtime prohibits UNIX sockets")
 	}
@@ -567,7 +568,7 @@ func shimSession(t *testing.T, shim string) (string, string, error) {
 		t.Fatal(err)
 	}
 	base := append(os.Environ(), "PATH="+shims+string(os.PathListSeparator)+real+string(os.PathListSeparator)+os.Getenv("PATH"))
-	values, err := sessionEnvironment(testConfig(), dir, address, binary, base, func(cli string) (string, error) { return filepath.Join(shims, cli), nil })
+	values, err := sessionEnvironment(testutil.Config(), dir, address, binary, base, func(cli string) (string, error) { return filepath.Join(shims, cli), nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +601,7 @@ exit 127
 	if err != nil || strings.TrimSpace(output) != `{"username":"alice"}` {
 		t.Fatalf("%v: %s", err, output)
 	}
-	calls := fakeGlabCalls(t, real)
+	calls := testutil.Calls(t, real)
 	if len(calls) != 1 {
 		t.Fatalf("real glab called %d times", len(calls))
 	}
@@ -643,17 +644,17 @@ func TestPathWithout(t *testing.T) {
 // records that it ran.
 func optionalSession(t *testing.T, github, gitlab bool, script string) (string, int, string) {
 	t.Helper()
-	fakes := fakeGlab(t)
+	fakes := testutil.FakeGlab(t)
 	gh := "#!/bin/sh\ntouch " + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
 	if err := os.WriteFile(filepath.Join(fakes, "gh"), []byte(gh), 0700); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	c := testConfig()
+	c := testutil.Config()
 	c.SessionHours = 1
 	c.GitHub.StateFile = filepath.Join(dir, "github.json")
 	c.GitHub.Optional = github
-	c.GitLab = glabConfig()
+	c.GitLab = testutil.GlabConfig()
 	c.GitLab.Optional = gitlab
 	raw, _ := json.Marshal(c)
 	configPath := filepath.Join(dir, "config.json")
@@ -709,8 +710,8 @@ echo harness done`
 	}
 	// The issuer's lookup, and nothing after it: no PAT, so no reaper and no
 	// revocation; the glab wrapper never reached the real glab.
-	calls := fakeGlabCalls(t, fakes)
-	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(glabConfig())}) {
+	calls := testutil.Calls(t, fakes)
+	if len(calls) != 1 || !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(testutil.GlabConfig())}) {
 		t.Errorf("glab calls: %q", calls)
 	}
 }
@@ -729,7 +730,7 @@ func TestRequiredProviderFailureStopsSession(t *testing.T) {
 		if code != 1 || !strings.HasSuffix(output, tc.want) || strings.Contains(output, "harness started") {
 			t.Errorf("optional GitHub %v, GitLab %v: exit %d:\n%s", tc.github, tc.gitlab, code, output)
 		}
-		if calls := fakeGlabCalls(t, fakes); len(calls) != tc.glabCalls {
+		if calls := testutil.Calls(t, fakes); len(calls) != tc.glabCalls {
 			t.Errorf("optional GitHub %v, GitLab %v: glab calls: %q", tc.github, tc.gitlab, calls)
 		}
 	}

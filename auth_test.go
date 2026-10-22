@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,25 +18,16 @@ import (
 	"time"
 
 	"github.com/nolith/geas/internal/config"
+	"github.com/nolith/geas/internal/testutil"
 )
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+// mockAPI is the shared transport fake, wired to this package's API.
 func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *API {
 	t.Helper()
 	a := newAPI()
-	a.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		code, value := handler(r)
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw)), Request: r}, nil
-	})
+	a.Client.Transport = testutil.Transport(handler)
 	return a
 }
-func boolPointer(v bool) *bool { return &v }
 
 // lookupAlias matches one aliased group or project of the lookup document.
 var lookupAlias = regexp.MustCompile(`(\w+): (group|project)\(fullPath: ("(?:[^"\\]|\\.)*")\)`)
@@ -130,13 +119,6 @@ func issuerAnswer(t *testing.T, query, user string, answers map[string]any, ids 
 
 // namespacedConfig allows two groups (one a subgroup), alice's personal
 // projects and one project elsewhere.
-func namespacedConfig() config.GitLabConfig {
-	return config.GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Groups: []string{"group", "other/sub"}, PersonalProjects: true, Projects: []string{"elsewhere/project"}, Permissions: []string{"read_project", "push_code"}}
-}
-func testConfig() config.Config {
-	return config.Config{SessionHours: 24, GitHub: config.GitHubConfig{ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}, GitLab: config.GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Repositories: []string{"group/project"}, ProjectIDs: []int64{42}, Scopes: []config.Scope{{Access: "USER", Permissions: []string{"read_user"}}, {Access: "SELECTED_MEMBERSHIPS", ResourceIDs: []string{"gid://gitlab/Project/42"}, Permissions: []string{"read_project", "push_code"}}}}}
-}
-
 func TestPrivateReadAndAtomicRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret")
 	if err := atomicWrite(path, []byte("first")); err != nil {
@@ -181,7 +163,7 @@ func TestFileLockCancellation(t *testing.T) {
 }
 func TestGitHubConcurrentRotation(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	c := testConfig().GitHub
+	c := testutil.Config().GitHub
 	c.StateFile = filepath.Join(t.TempDir(), "github.json")
 	var calls atomic.Int32
 	api := mockAPI(t, func(r *http.Request) (int, any) {
@@ -223,13 +205,13 @@ func TestGitHubConcurrentRotation(t *testing.T) {
 }
 func TestGitHubIdentityMismatch(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) { return 200, map[string]string{"login": "someone-else"} })
-	g := &GitHub{Config: testConfig().GitHub, API: api, Now: time.Now}
+	g := &GitHub{Config: testutil.Config().GitHub, API: api, Now: time.Now}
 	if g.verify(context.Background(), "ghu_test") == nil {
 		t.Fatal("accepted wrong user")
 	}
 }
 func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
-	c := testConfig().GitLab
+	c := testutil.Config().GitLab
 	name := ""
 	deleted := false
 	// The earlier format resolves its project IDs, then checks the paths.
@@ -290,7 +272,7 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 		minted, answer = issuerAnswer(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
 		return 200, answer
 	})
-	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}
@@ -303,7 +285,7 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 		minted, answer = issuerAnswer(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
 		return 200, answer
 	})
-	g := &GitLab{Config: testConfig().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.Config().GitLab, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
 		t.Fatal("minted for another user")
 	}
@@ -322,86 +304,8 @@ func TestAPIErrorsDoNotExposeSecrets(t *testing.T) {
 // fakeGlab writes a glab into a new directory and returns it. Each call
 // records its arguments (NUL-separated), environment and directory there, and
 // is answered as gitlab.com would for alice and group/project (ID 42).
-func fakeGlab(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	script := `#!/bin/sh
-log=` + shellQuote(dir) + `
-n=$(($(cat "$log/count" 2>/dev/null || echo 0) + 1))
-echo "$n" >"$log/count"
-printf '%s\0' "$@" >"$log/args.$n"
-env >"$log/env.$n"
-pwd >"$log/cwd.$n"
-ps -o pgid= -p $$ | tr -d ' ' >"$log/pgid.$n"
-if [ -n "${FAKE_GLAB_FAIL-}" ]; then
-	echo 'glab-secret on stdout'
-	echo 'glab-secret on stderr' >&2
-	exit 1
-fi
-method=
-for last; do
-	[ "${previous-}" = --method ] && method=$last
-	previous=$last
-done
-case "$method $last" in
-"GET user") echo '{"username":"alice"}' ;;
-"GET projects/42") echo '{"path_with_namespace":"group/project"}' ;;
-" input="*) echo '{"data":{"personalAccessTokenCreate":{"token":"session-secret","errors":[]}}}' ;;
-" query="*)
-	case "$last" in
-	*personalAccessTokens*)
-		name=$(printf '%s' "$last" | sed -n 's/.*search: "\([^"]*\)".*/\1/p')
-		printf '%s' "$name" >"$log/name"
-		printf '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[{"id":"gid://gitlab/PersonalAccessToken/99","name":"%s-other"},{"id":"gid://gitlab/PersonalAccessToken/42","name":"%s"}]}}}}\n' "$name" "$name"
-		;;
-	*"projects(ids:"*)
-		echo '{"data":{"currentUser":{"username":"alice"},"l0":{"nodes":[{"id":"gid://gitlab/Project/42","fullPath":"group/project"}]}}}'
-		;;
-	*)
-		echo "unexpected query" >&2
-		exit 1
-		;;
-	esac
-	;;
-"GET personal_access_tokens/42")
-	active=true
-	[ -e "$log/revoked" ] && active=false
-	printf '{"id":42,"name":"%s","active":%s}\n' "$(cat "$log/name")" "$active"
-	;;
-"DELETE personal_access_tokens/42") touch "$log/revoked" ;;
-*)
-	echo "unexpected $method $last" >&2
-	exit 1
-	;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(dir, "glab"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-func fakeGlabCalls(t *testing.T, dir string) [][]string {
-	t.Helper()
-	var calls [][]string
-	for n := 1; ; n++ {
-		raw, err := os.ReadFile(filepath.Join(dir, "args."+strconv.Itoa(n)))
-		if errors.Is(err, os.ErrNotExist) {
-			return calls
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		calls = append(calls, strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00"))
-	}
-}
-func glabConfig() config.GitLabConfig {
-	c := testConfig().GitLab
-	c.Issuer, c.IssuerTokenFile = "glab", ""
-	return c
-}
-
 func TestGlabIssuerCreateAndRevoke(t *testing.T) {
-	dir := fakeGlab(t)
+	dir := testutil.FakeGlab(t)
 	path := os.Getenv("PATH")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+path)
 	state := t.TempDir()
@@ -409,7 +313,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	for _, key := range glabUnset {
 		t.Setenv(key, "outer-secret")
 	}
-	g, err := newGitLab(glabConfig(), nil, nil)
+	g, err := newGitLab(testutil.GlabConfig(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +329,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	if err = g.revokeCreated(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	calls := fakeGlabCalls(t, dir)
+	calls := testutil.Calls(t, dir)
 	if len(calls) != 4 {
 		t.Fatalf("got %d glab calls: %q", len(calls), calls)
 	}
@@ -435,7 +339,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 			t.Errorf("call %d not pinned to gitlab.com: %q", i+1, call)
 		}
 	}
-	if !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(glabConfig())}) {
+	if !slices.Equal(calls[0][3:], []string{"graphql", "-f", "query=" + lookupDocument(testutil.GlabConfig())}) {
 		t.Errorf("lookup: %q", calls[0])
 	}
 	mint := calls[1][3:]
@@ -486,7 +390,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	}
 }
 func TestGlabIssuerFailureIsSilent(t *testing.T) {
-	dir := fakeGlab(t)
+	dir := testutil.FakeGlab(t)
 	t.Setenv("FAKE_GLAB_FAIL", "1")
 	issuer := glabIssuer{executable: filepath.Join(dir, "glab"), lockPath: filepath.Join(t.TempDir(), "glab")}
 	captured, err := os.CreateTemp(t.TempDir(), "output")
@@ -506,25 +410,25 @@ func TestGlabIssuerFailureIsSilent(t *testing.T) {
 	if raw, _ := os.ReadFile(captured.Name()); len(raw) != 0 {
 		t.Fatalf("glab output reached the launcher's: %q", raw)
 	}
-	if len(fakeGlabCalls(t, dir)) != 2 {
+	if len(testutil.Calls(t, dir)) != 2 {
 		t.Fatal("glab not called")
 	}
 }
 func TestGlabIssuerRejectsScalarVariables(t *testing.T) {
-	dir := fakeGlab(t)
+	dir := testutil.FakeGlab(t)
 	issuer := glabIssuer{executable: filepath.Join(dir, "glab"), lockPath: filepath.Join(t.TempDir(), "glab")}
 	if issuer.graphql(context.Background(), createPAT, map[string]any{"name": "x"}, new(any)) == nil {
 		t.Fatal("sent a JSON string through -F")
 	}
-	if len(fakeGlabCalls(t, dir)) != 0 {
+	if len(testutil.Calls(t, dir)) != 0 {
 		t.Fatal("called glab")
 	}
 }
 
 // Refused before reading stdin or touching any file.
 func TestSaveGitLabIssuerRefusedWithGlabIssuer(t *testing.T) {
-	c := testConfig()
-	c.GitLab = glabConfig()
+	c := testutil.Config()
+	c.GitLab = testutil.GlabConfig()
 	path := filepath.Join(t.TempDir(), "config.json")
 	raw, _ := json.Marshal(c)
 	os.WriteFile(path, raw, 0600)
@@ -537,7 +441,7 @@ func TestSaveGitLabIssuerRefusedWithGlabIssuer(t *testing.T) {
 // TestLookupDocument pins the one aliased query that replaces the REST user
 // call and the per-namespace lookups, and the escaping of a path in it.
 func TestLookupDocument(t *testing.T) {
-	c := namespacedConfig()
+	c := testutil.NamespacedConfig()
 	c.Groups, c.Projects, c.PersonalProjects = []string{"group", "other/sub"}, []string{"elsewhere/project"}, false
 	want := `query SessionLookup {
   currentUser { username }
@@ -550,7 +454,7 @@ func TestLookupDocument(t *testing.T) {
 		t.Fatalf("document:\n%s", got)
 	}
 	// The earlier format asks for its project IDs, one node per ID.
-	c = testConfig().GitLab
+	c = testutil.Config().GitLab
 	want = `query SessionLookup {
   currentUser { username }
   l0: projects(ids: ["gid://gitlab/Project/42"]) { nodes { id fullPath } }
@@ -599,7 +503,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		t.Errorf("unexpected %s %s", r.Method, r.URL)
 		return 404, nil
 	})
-	g := &GitLab{Config: namespacedConfig(), Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
+	g := &GitLab{Config: testutil.NamespacedConfig(), Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if token, err := g.create(context.Background(), time.Hour); err != nil || token != "session-secret" {
 		t.Fatalf("%s %v", token, err)
 	}
@@ -617,7 +521,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 		t.Fatalf("scopes %s", got)
 	}
 	// Without personal projects or explicit lists, only what is configured.
-	c := namespacedConfig()
+	c := testutil.NamespacedConfig()
 	c.Groups, c.Projects = nil, nil
 	g = &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), time.Hour); err != nil {
@@ -646,7 +550,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 			minted, answer = issuerAnswer(t, query, "alice", map[string]any{"group": tc.answer}, nil)
 			return 200, answer
 		})
-		c := namespacedConfig()
+		c := testutil.NamespacedConfig()
 		c.Groups, c.Projects = []string{"group"}, nil
 		g := &GitLab{Config: c, Issuer: bearerIssuer{api: api, token: "issuer"}, Now: time.Now}
 		if _, err := g.create(context.Background(), time.Hour); err == nil || minted {
