@@ -394,7 +394,7 @@ func TestGlabIssuerCreateAndRevoke(t *testing.T) {
 	for _, key := range glabUnset {
 		t.Setenv(key, "outer-secret")
 	}
-	g, err := newGitLab(glabConfig(), nil)
+	g, err := newGitLab(glabConfig(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

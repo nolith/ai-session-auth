@@ -147,15 +147,17 @@ type GitLab struct {
 	Issuer  issuer
 	Created []sessionPAT
 	Now     func() time.Time
+	// Steps times the start-up calls for GEAS_DEBUG=timing; nil when off.
+	Steps *stepTimer
 }
 
-func newGitLab(config GitLabConfig, api *API) (*GitLab, error) {
+func newGitLab(config GitLabConfig, api *API, steps *stepTimer) (*GitLab, error) {
 	if config.Issuer == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
 			return nil, err
 		}
-		return &GitLab{Config: config, Issuer: glab, Now: time.Now}, nil
+		return &GitLab{Config: config, Issuer: glab, Now: time.Now, Steps: steps}, nil
 	}
 	raw, err := privateRead(config.IssuerTokenFile)
 	if err != nil {
@@ -165,7 +167,7 @@ func newGitLab(config GitLabConfig, api *API) (*GitLab, error) {
 	if token == "" {
 		return nil, errors.New("empty GitLab issuer token")
 	}
-	return &GitLab{Config: config, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now}, nil
+	return &GitLab{Config: config, Issuer: bearerIssuer{api: api, token: token}, Now: time.Now, Steps: steps}, nil
 }
 func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, error) {
 	if err := validateGitLabAllowlist(g.Config); err != nil {
@@ -181,6 +183,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 		return "", errors.New("GitLab issuer user does not match expected_user")
 	}
 	scopes, err := g.scopes(ctx)
+	g.Steps.step("GitLab issuer lookup")
 	if err != nil {
 		return "", err
 	}
@@ -204,6 +207,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	if err := g.Issuer.graphql(ctx, createPAT, variables, &result); err != nil {
 		return "", err
 	}
+	g.Steps.step("mint")
 	if len(result.Errors) > 0 || len(result.Data.Create.Errors) > 0 || result.Data.Create.Token == "" {
 		return "", errors.New("GitLab PAT creation failed: verify granular scopes and issuer permissions")
 	}
@@ -211,6 +215,7 @@ func (g *GitLab) create(ctx context.Context, duration time.Duration) (string, er
 	// the exit, which may have little time, and gives the reaper its target.
 	g.Created = append(g.Created, sessionPAT{Name: name})
 	id, err := g.find(ctx, name)
+	g.Steps.step("id lookup")
 	if err != nil {
 		return "", err
 	}

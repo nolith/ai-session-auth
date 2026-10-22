@@ -9,9 +9,51 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
+
+// stepTimer measures the session start, for GEAS_DEBUG=timing. Each line is
+// one step's duration since the previous step, so the lines add up to the time
+// before the harness starts. The timer stops just before the harness does:
+// after that, a line would scribble over the agent's terminal.
+type stepTimer struct {
+	enabled bool
+	output  io.Writer
+	last    time.Time
+}
+
+// newStepTimer returns nil unless GEAS_DEBUG lists "timing". A nil timer's
+// methods do nothing, so callers never check it.
+func newStepTimer(debug string, output io.Writer) *stepTimer {
+	for _, value := range strings.Split(debug, ",") {
+		if strings.TrimSpace(value) == "timing" {
+			return &stepTimer{enabled: true, output: output, last: time.Now()}
+		}
+	}
+	return nil
+}
+
+// step prints the duration of the step that just finished, and starts the
+// next one.
+func (t *stepTimer) step(name string) {
+	if t == nil || !t.enabled {
+		return
+	}
+	now := time.Now()
+	fmt.Fprintf(t.output, "geas timing: %-20s %.3fs\n", name, now.Sub(t.last).Seconds())
+	t.last = now
+}
+
+// stop prints the last step and silences the timer for good.
+func (t *stepTimer) stop() {
+	if t == nil {
+		return
+	}
+	t.step("harness start")
+	t.enabled = false
+}
 
 func exitCode(err error) int {
 	if err == nil {
@@ -118,7 +160,7 @@ func skip(output io.Writer, provider, reason, fix string) {
 	fmt.Fprintf(output, "WARNING: %s is not available in this session: %s. Fix: %s\n", provider, reason, fix)
 }
 
-func runSession(ctx context.Context, config Config, args []string, api *API, output io.Writer) (int, error) {
+func runSession(ctx context.Context, config Config, args []string, api *API, output io.Writer, timer *stepTimer) (int, error) {
 	if len(args) == 0 {
 		return 1, errors.New("specify a harness command after run --")
 	}
@@ -138,7 +180,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	// on your PATH.
 	var gitlab *GitLab
 	if enabled(config.GitLab.Enabled) {
-		gitlab, err = newGitLab(config.GitLab, api)
+		gitlab, err = newGitLab(config.GitLab, api, timer)
 		if err != nil {
 			// A missing glab is setup, like a missing gh; an unreadable issuer
 			// file is a credential, like GitHub's state file.
@@ -170,6 +212,7 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 		if err == nil {
 			err = github.verify(ctx, token)
 		}
+		timer.step("GitHub token")
 		if err != nil {
 			if githubSkipped = skippable(ctx, config.GitHub.Optional, err); githubSkipped == "" {
 				return 1, err
@@ -240,5 +283,6 @@ func runSession(ctx context.Context, config Config, args []string, api *API, out
 	} else {
 		fmt.Fprintln(output, "Session ready: user credentials available through gh/glab and Git HTTPS.")
 	}
+	timer.stop()
 	return runHarness(ctx, args, environment, config.duration())
 }

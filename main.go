@@ -54,7 +54,9 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		usage(os.Stderr)
 		return 2, errors.New("specify a command")
 	}
+	timer := newStepTimer(os.Getenv("GEAS_DEBUG"), os.Stderr)
 	config, err := loadConfig(*path)
+	timer.step("config load")
 	if err != nil {
 		return 1, err
 	}
@@ -90,7 +92,7 @@ func execute(ctx context.Context, args []string, api *API) (int, error) {
 		if len(command) > 0 && command[0] == "--" {
 			command = command[1:]
 		}
-		return runSession(ctx, config, command, api, os.Stderr)
+		return runSession(ctx, config, command, api, os.Stderr, timer)
 	default:
 		return 2, errors.New("unknown command")
 	}

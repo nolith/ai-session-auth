@@ -109,7 +109,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath string, pat sessi
 		logf("cannot load the configuration: %v", err)
 		return err
 	}
-	gitlab, err := newGitLab(config.GitLab, newAPI())
+	gitlab, err := newGitLab(config.GitLab, newAPI(), nil)
 	if err != nil {
 		logf("cannot prepare the issuer: %v", err)
 		return err
