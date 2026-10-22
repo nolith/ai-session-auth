@@ -101,21 +101,24 @@ func RunReaper(ctx context.Context, args []string) error {
 }
 
 // revokers builds, from the configuration alone, every provider an entry may
-// name, by ID.
-func revokers(settings config.Config) (map[string]ledger.Revoker, error) {
-	providers := map[string]ledger.Revoker{}
-	if config.Enabled(settings.GitLab.Enabled) {
-		gl, err := gitlab.New(settings.GitLab, settings.Duration(), api.New(), nil)
+// name, by ID. One that cannot be prepared, such as a GitLab instance whose
+// issuer file is unreadable, is left out, and unprepared says why, by ID: it
+// matters only if the ledger lists something for it.
+func revokers(settings config.Config) (providers map[string]ledger.Revoker, unprepared map[string]error) {
+	providers, unprepared = map[string]ledger.Revoker{}, map[string]error{}
+	for _, c := range settings.GitLab {
+		gl, err := gitlab.New(c, settings.Duration(), api.New(), nil)
 		if err != nil {
-			return nil, err
+			unprepared[(&gitlab.Provider{Config: c}).ID()] = err
+			continue
 		}
 		providers[gl.ID()] = gl
 	}
-	if config.Enabled(settings.GitHub.Enabled) {
-		gh := github.New(settings.GitHub, api.New())
+	for _, c := range settings.GitHub {
+		gh := github.New(c, api.New())
 		providers[gh.ID()] = gh
 	}
-	return providers, nil
+	return providers, unprepared
 }
 
 // watch logs to reaperLogPath(), never to a terminal, and only when it acts.
@@ -148,7 +151,7 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 	}
 	// An issuer that cannot be prepared matters only if the ledger lists
 	// something for it to revoke; the directory goes either way.
-	providers, prepareErr := revokers(settings)
+	providers, unprepared := revokers(settings)
 	message, _ := io.ReadAll(io.LimitReader(launcher, int64(len(reaperDone))+1))
 	if string(message) == reaperDone {
 		return nil
@@ -169,14 +172,21 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 		logf(session, "cannot read the ledger: %v", err)
 		return err
 	}
-	if len(pending) > 0 && prepareErr != nil {
-		book.Close()
-		logf(session, "cannot prepare the issuer: %v", prepareErr)
-		return prepareErr
-	}
-	// Retrying cannot revoke an entry whose provider is gone or whose ID
-	// names another credential; it stays in the ledger.
+	// Retrying cannot revoke an entry whose provider is gone or cannot be
+	// prepared, or whose ID names another credential; it stays in the
+	// ledger, and the other providers' entries are revoked all the same.
 	var refused bool
+	var refusal error
+	prepared := pending[:0]
+	for _, e := range pending {
+		if prepareErr := unprepared[e.Provider]; prepareErr != nil {
+			refusal, refused = prepareErr, true
+			entryf(e, "cannot prepare the issuer: %v", prepareErr)
+			continue
+		}
+		prepared = append(prepared, e)
+	}
+	pending = prepared
 	for attempt, pause := range reaperPauses {
 		if len(pending) == 0 {
 			break
@@ -222,7 +232,11 @@ func watch(ctx context.Context, launcher io.Reader, configPath, sessionID string
 	}
 	book.Close()
 	if len(pending) > 0 || refused {
+		if err == nil {
+			err = refusal
+		}
 		return err
 	}
+
 	return dir.Remove()
 }

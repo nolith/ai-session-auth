@@ -34,10 +34,13 @@ nix develop
 Start an AI harness with API and Git HTTPS access under your own identity:
 
 ```bash
-./geas --config config.json run -- codex
+./geas run -- codex
 ```
 
-Replace `codex` with any command and its arguments.
+Replace `codex` with any command and its arguments. The configuration is
+`$XDG_CONFIG_HOME/geas/config.json` (`~/.config/geas/config.json` by
+default, on macOS too) unless `--config` names another; see "Configuration
+and launch".
 Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 
 ## Features
@@ -114,9 +117,9 @@ session's PAT: either your own `glab` login or a PAT you store.
 
 ### Issuer: your glab login
 
-If `glab auth login` works for gitlab.com, set `"issuer": "glab"` in the
-`gitlab` section and leave out `issuer_token_file`. The two cannot be
-combined, and `save-gitlab-issuer` has nothing to save.
+If `glab auth login` works for gitlab.com, set `"issuer": {"type": "glab"}`
+on the `gitlab` provider. It takes no `token_file`, and
+`save-gitlab-issuer` has nothing to save.
 
 Every issuer request then runs `glab api --hostname gitlab.com ...`:
 
@@ -150,6 +153,8 @@ their PATs, which then expire on their own. `glab auth login` fixes both.
 
 ### Issuer: a stored PAT
 
+Set `"issuer": {"type": "bearer", "token_file": "~/.local/state/geas/gitlab-issuer"}`
+on the `gitlab` provider; geas sends the PAT stored there as a bearer token.
 Open https://gitlab.com/-/user_settings/personal_access_tokens.
 Create an **issuer PAT** for your own user, separate from the agent's session PATs.
 
@@ -159,7 +164,7 @@ Prefer a fine-grained issuer PAT with:
   User **Read** to verify your identity.
 - In the allowlisted groups and projects, and your personal projects if
   enabled: at least every permission granted to the agent token, as listed in
-  `gitlab.permissions` in `config.example.json`.
+  `permissions` of the `gitlab` provider in `config.example.json`.
 
 The API permission names for the issuer's User boundary are:
 
@@ -178,14 +183,15 @@ this version does not automatically renew the issuer credential.
 
 ### Allowlist
 
-List what agents may reach by path, with no numeric IDs:
+List what agents may reach by path, with no numeric IDs, on the `gitlab`
+provider:
 
-- `gitlab.groups`: groups such as `gitlab-org` or `gitlab-org/ai`. A group
+- `groups`: groups such as `gitlab-org` or `gitlab-org/ai`. A group
   covers its subgroups and all their projects.
-- `gitlab.personal_projects`: `true` adds the projects in your own namespace,
+- `personal_projects`: `true` adds the projects in your own namespace,
   `expected_user/...`.
-- `gitlab.projects`: single projects, such as `some-group/project`.
-- `gitlab.permissions`: one list, granted on all of the above.
+- `projects`: single projects, such as `some-group/project`.
+- `permissions`: one list, granted on all of the above.
 
 At session start, each group and project is looked up with `GET groups/:path`
 or `GET projects/:path` and refused unless GitLab reports the same path, in the
@@ -208,64 +214,114 @@ reads. Destructive, administrative, and merge permissions are excluded from
 the initial profile. Git pushes remain subject to your user permissions and
 the project's branch protections.
 
-#### Project IDs (earlier format)
-
-Configurations with exact `repositories`, numeric `project_ids` and
-hand-written `granular_scopes` keep working, but cannot be mixed with the
-fields above:
-
-- `gitlab.repositories`: exact paths, such as `nolith/project`;
-- `gitlab.project_ids`: numeric project IDs;
-- `gitlab.granular_scopes`: `USER` with `read_user`, and `SELECTED_MEMBERSHIPS`
-  with `resourceIds` such as `gid://gitlab/Project/ID`.
-
-The launcher queries the projects and verifies that their IDs and paths match.
-
 ## Configuration and launch
 
 ```bash
-cp config.example.json config.json
+mkdir -p ~/.config/geas
+cp config.example.json ~/.config/geas/config.json
 # Set the Client ID, usernames, GitHub owners or repositories and GitLab groups before proceeding.
-./geas --config config.json save-gitlab-issuer   # not with issuer "glab"
-./geas --config config.json github-login
-./geas --config config.json run -- codex
+./geas config check
+./geas save-gitlab-issuer   # only with a "bearer" issuer
+./geas github-login
+./geas run -- codex
 ```
 
+The configuration is `$XDG_CONFIG_HOME/geas/config.json`, else
+`~/.config/geas/config.json`, on macOS too; `--config PATH`, before the
+command, names another. It is version 2, a list of providers:
+
+```json
+{
+  "version": 2,
+  "session_hours": 24,
+  "providers": [
+    { "type": "gitlab", "host": "gitlab.com", "issuer": { "type": "glab" }, "expected_user": "...", "groups": ["..."], "permissions": ["..."] },
+    { "type": "github", "host": "github.com", "client_id": "...", "expected_user": "...", "state_file": "...", "owners": ["..."] }
+  ]
+}
+```
+
+| Field           | Meaning                                                                                 |
+| :-------------- | :-------------------------------------------------------------------------------------- |
+| `version`       | `2`, required                                                                           |
+| `session_hours` | the session's length, 24 by default, at most 48                                         |
+| `providers`     | one entry per credential source, by `type`: `gitlab` or `github`; one provider per host |
+
+A `gitlab` provider has `host` (`gitlab.com`), `issuer`, `expected_user`,
+its allowlist (see "Allowlist" above) and `permissions`; the `github`
+provider has `host` (`github.com`, the only one supported), `client_id`,
+`expected_user`, `state_file`, and `owners` or `repositories`. Relative
+paths are relative to the configuration's directory; `~/` is your home.
+Unknown fields are refused, with their name. The type `ssh` is reserved for
+a later version and refused for now.
+
+`geas config check` loads the configuration, refuses it as `geas run` would,
+and lists its providers:
+
+```console
+$ geas config check
+/home/alice/.config/geas/config.json: version 2, session_hours 24
+  gitlab:gitlab.com  issuer glab, as alice
+  github:github.com  as alice
+```
+
+### Migrating from version 1
+
+Version 1, with its `github` and `gitlab` sections, is refused: `geas config
+check` and `geas run` name the first version 1 field they find. The fields
+move as follows:
+
+| Version 1                                                                   | Version 2                                                             |
+| :-------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| no `version`                                                                | `"version": 2`                                                        |
+| `session_hours`                                                             | `session_hours`, unchanged                                            |
+| `github: {...}`                                                             | an entry of `providers` with `"type": "github", "host": "github.com"` |
+| `gitlab: {...}`                                                             | an entry of `providers` with `"type": "gitlab", "host": "gitlab.com"` |
+| `enabled: false`                                                            | leave the provider out                                                |
+| `optional`                                                                  | gone: a provider that fails never stops the session                   |
+| `github.client_id`, `expected_user`, `state_file`, `owners`, `repositories` | the same fields on the `github` provider                              |
+| `gitlab.issuer: "glab"`                                                     | `"issuer": {"type": "glab"}`                                          |
+| `gitlab.issuer_token_file`                                                  | `"issuer": {"type": "bearer", "token_file": ...}`                     |
+| `gitlab.expected_user`                                                      | `expected_user` on the `gitlab` provider                              |
+| `gitlab.groups`, `personal_projects`, `projects`, `permissions`             | the same fields on the `gitlab` provider                              |
+| `gitlab.repositories`, `project_ids`, `granular_scopes`                     | gone: list the projects by path in `projects`, with `permissions`     |
+
+The files the configuration names, GitHub's `state_file` and a stored
+issuer PAT, keep their format and can stay where they are.
+
 `save-gitlab-issuer` prompts for the PAT with hidden input. Do not put it in the
-command line or configuration file. It saves the PAT at `issuer_token_file`
-with mode 600. `github-login` displays a URL and a one-time code to authorize
+command line or configuration file. It saves the PAT at the issuer's
+`token_file` with mode 600; with more than one `bearer` issuer, name the host
+with `--host`. `github-login` displays a URL and a one-time code to authorize
 in your browser; it does not print the returned tokens. It saves the OAuth
 state at `state_file`.
 
-Use absolute paths to launch the harness from another checkout:
+Use an absolute path to launch the harness from another checkout:
 
 ```bash
-/path/geas/geas \
-  --config /path/geas/config.json run -- codex
+/path/geas/geas run -- codex
 ```
 
 The current working directory and command arguments are preserved.
-To use only one provider, set `enabled: false` for the other.
+To use only one provider, leave the other out of `providers`.
 
 A provider whose credential cannot be obtained never stops the session: a
 missing, unreadable or expired GitHub login, a failed refresh or
 `expected_user` check, or for GitLab a failed issuer (logged-out or missing
-glab, unreadable `issuer_token_file`), user check, group or project
+glab, unreadable `token_file`), user check, group or project
 resolution or PAT creation. The harness has started by then; the provider's
 marker records the reason (see "Session start"), and nothing is printed.
 Fix the login (`geas github-login`, `glab auth login` or
 `geas save-gitlab-issuer`) and start a new session. Configuration errors still
 stop the session before the harness starts, with exit code 125.
 
-Every provider now behaves as `optional: true` did: the `optional` field is
-still accepted, and has no effect.
-
 ## Verify on your account
 
 Before starting an operational session, open a verification shell:
 
 ```bash
-./geas --config config.json run -- bash
+./geas run -- bash
+
 ```
 
 Inside the shell, verify your identity and read-only operations:

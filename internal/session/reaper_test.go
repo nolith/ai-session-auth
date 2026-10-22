@@ -23,7 +23,7 @@ func reaperSession(t *testing.T, entry ledger.Entry) (string, *ledger.Ledger, st
 	glab := testutil.FakeGlab(t)
 	t.Setenv("PATH", glab+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: testutil.Bool(false)}, GitLab: testutil.GlabConfig()}
+	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}}
 	raw, _ := json.Marshal(c)
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, raw, 0600); err != nil {

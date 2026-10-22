@@ -31,7 +31,7 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	base := append(os.Environ(), "GH_TOKEN=old-secret", "GITLAB_TOKEN=old-secret", "SSH_AUTH_SOCK=old-socket", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=Alice")
 	session := testutil.SessionDir(t)
 	c := testutil.Config()
-	hosts, err := credhelper.Hosts([]provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)})
+	hosts, err := credhelper.Hosts([]provider.Provider{&gitlab.Provider{Config: c.GitLab[0]}, github.New(c.GitHub[0], nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestIssuerReadCancellation(t *testing.T) {
 // expanded; a conflict, or a session variable, stops the session first.
 func TestProviderEnv(t *testing.T) {
 	c := testutil.Config()
-	providers := []provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)}
+	providers := []provider.Provider{&gitlab.Provider{Config: c.GitLab[0]}, github.New(c.GitHub[0], nil)}
 	env, err := providerEnv(providers, "/state/geas/sessions/x")
 	if err != nil || len(env) != 3 || env["GLAB_CONFIG_DIR"] != "/state/geas/sessions/x/glab" || env["GH_CONFIG_DIR"] != "/state/geas/sessions/x/gh" || env["GH_PROMPT_DISABLED"] != "1" {
 		t.Fatalf("%v %v", env, err)
@@ -160,9 +160,9 @@ func TestWriteSandbox(t *testing.T) {
 	t.Setenv("GLAB_CONFIG_DIR", "/elsewhere/glab")
 	t.Setenv("GH_CONFIG_DIR", "/elsewhere/gh")
 	c := testutil.Config()
-	c.GitHub.StateFile = "/state/github.json"
-	c.GitLab.IssuerTokenFile = "/state/issuer.txt"
-	if err := writeSandbox(session, []provider.Provider{&gitlab.Provider{Config: c.GitLab}, github.New(c.GitHub, nil)}); err != nil {
+	c.GitHub[0].StateFile = "/state/github.json"
+	c.GitLab[0].Issuer.TokenFile = "/state/issuer.txt"
+	if err := writeSandbox(session, []provider.Provider{&gitlab.Provider{Config: c.GitLab[0]}, github.New(c.GitHub[0], nil)}); err != nil {
 		t.Fatal(err)
 	}
 	state, _ := secretfile.StateDirectory()
@@ -199,7 +199,7 @@ func TestKeepFresh(t *testing.T) {
 	t.Cleanup(func() { refreshMargin, refreshRetry = margin, retry })
 	session := testutil.SessionDir(t)
 	store := newCredentials(session)
-	p := &refreshing{Provider: github.New(testutil.Config().GitHub, nil), calls: make(chan int, 10)}
+	p := &refreshing{Provider: github.New(testutil.GitHub(), nil), calls: make(chan int, 10)}
 	first := provider.Credential{Secret: "ghu_0", User: "alice", Expires: time.Now().Add(time.Hour)}
 	if err := store.put(p, first); err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestKeepFreshMarksAnExpiredCredential(t *testing.T) {
 	down := errors.New("GitHub refresh failed; reauthorize with github-login")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := &scripted{Provider: github.New(testutil.Config().GitHub, nil), dir: session, clock: clk, stop: cancel,
+	p := &scripted{Provider: github.New(testutil.GitHub(), nil), dir: session, clock: clk, stop: cancel,
 		// At 7:56, 7:57, 7:58, 7:59 and 8:00, then 8:01.
 		answers: []error{down, down, down, down, down, nil}}
 	first := provider.Credential{Secret: "ghu_0", User: "alice", Expires: start.Add(8 * time.Hour)}
@@ -313,8 +313,8 @@ func TestRunWithoutAReaper(t *testing.T) {
 	}
 	t.Cleanup(func() { launchReaper = before })
 	c := testutil.Config()
-	c.GitLab.Enabled = testutil.Bool(false)
-	c.GitHub.StateFile = filepath.Join(t.TempDir(), "github.json")
+	c.GitLab = nil
+	c.GitHub[0].StateFile = filepath.Join(t.TempDir(), "github.json")
 	ran := filepath.Join(t.TempDir(), "ran")
 	code, err := Run(context.Background(), c, []string{"/bin/sh", "-c", "touch " + shellQuote(ran)}, nil, new(bytes.Buffer), nil)
 	if code != ExitNotStarted || err == nil || err.Error() != "cannot start the revocation reaper" {

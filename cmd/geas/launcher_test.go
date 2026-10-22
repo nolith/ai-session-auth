@@ -60,7 +60,7 @@ func launch(t *testing.T, script string, env ...string) *testSession {
 	t.Helper()
 	s := &testSession{glab: testutil.FakeGlab(t), state: t.TempDir(), done: make(chan error, 1)}
 	dir := t.TempDir()
-	c := config.Config{SessionHours: 1, GitHub: config.GitHubConfig{Enabled: testutil.Bool(false)}, GitLab: testutil.GlabConfig()}
+	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}}
 	raw, _ := json.Marshal(c)
 	s.config = filepath.Join(dir, "config.json")
 	if err := os.WriteFile(s.config, raw, 0600); err != nil {
@@ -376,10 +376,9 @@ func TestLauncherKilledDuringMintIsReaped(t *testing.T) {
 }
 
 // failingSession runs the launcher to its end with a GitHub login never made
-// and a glab issuer that fails, each optional as given, and returns its output,
-// its exit code and the fake glab's directory. The gh beside that glab only
-// records that it ran.
-func failingSession(t *testing.T, optional bool, script string) (string, int, string) {
+// and a glab issuer that fails, and returns its output, its exit code and the
+// fake glab's directory. The gh beside that glab only records that it ran.
+func failingSession(t *testing.T, script string) (string, int, string) {
 	t.Helper()
 	fakes := testutil.FakeGlab(t)
 	gh := "#!/bin/sh\necho \"GH_CONFIG_DIR=$GH_CONFIG_DIR GH_TOKEN=${GH_TOKEN-unset}\" >" + shellQuote(filepath.Join(fakes, "gh-called")) + "\n"
@@ -389,10 +388,8 @@ func failingSession(t *testing.T, optional bool, script string) (string, int, st
 	dir := t.TempDir()
 	c := testutil.Config()
 	c.SessionHours = 1
-	c.GitHub.StateFile = filepath.Join(dir, "github.json")
-	c.GitHub.Optional = optional
-	c.GitLab = testutil.GlabConfig()
-	c.GitLab.Optional = optional
+	c.GitHub[0].StateFile = filepath.Join(dir, "github.json")
+	c.GitLab = []config.GitLabConfig{testutil.GlabConfig()}
 	raw, _ := json.Marshal(c)
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, raw, 0600); err != nil {
@@ -409,11 +406,10 @@ func failingSession(t *testing.T, optional bool, script string) (string, int, st
 	return string(output), launcher.ProcessState.ExitCode(), fakes
 }
 
-// A provider that fails never stops the start, optional or not: the harness
-// runs, and the failure goes to the provider's marker, never to the
-// terminal. gh and glab are the real ones, configured from the session
-// directory, where no token arrived, and Git refuses instead of reaching a
-// prompt.
+// A provider that fails never stops the start: the harness runs, and the
+// failure goes to the provider's marker, never to the terminal. gh and glab
+// are the real ones, configured from the session directory, where no token
+// arrived, and Git refuses instead of reaching a prompt.
 func TestFailingProvidersNeverStopTheStart(t *testing.T) {
 	script := `until grep -qs failed "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com" && grep -qs failed "$GEAS_SESSION_DIR/markers/github:github.com"; do sleep 0.02; done
 echo harness started
@@ -426,44 +422,42 @@ if command -v git >/dev/null; then
 	printf 'protocol=https\nhost=gitlab.com\npath=group/project.git\n\n' | git credential fill
 fi
 echo harness done`
-	for _, optional := range []bool{false, true} {
-		output, code, fakes := failingSession(t, optional, script)
-		if code != 0 || !strings.HasPrefix(output, "harness started\n") {
-			t.Fatalf("optional %v: exit %d: %s", optional, code, output)
+	output, code, fakes := failingSession(t, script)
+	if code != 0 || !strings.HasPrefix(output, "harness started\n") {
+		t.Fatalf("exit %d: %s", code, output)
+	}
+	for _, want := range []string{
+		`{"state":"failed","reason":"run github-login before starting a session","time":`,
+		"github:github.com  failed: run github-login before starting a session\ngitlab:gitlab.com  failed: glab issuer request failed\nstatus exit 1\n",
+		"gh exit 0\n",
+		"glab configured in the session\n",
+		"no glab token\n",
+		"harness done\n",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output lacks %q:\n%s", want, output)
 		}
-		for _, want := range []string{
-			`{"state":"failed","reason":"run github-login before starting a session","time":`,
-			"github:github.com  failed: run github-login before starting a session\ngitlab:gitlab.com  failed: glab issuer request failed\nstatus exit 1\n",
-			"gh exit 0\n",
-			"glab configured in the session\n",
-			"no glab token\n",
-			"harness done\n",
-		} {
-			if !strings.Contains(output, want) {
-				t.Errorf("optional %v: output lacks %q:\n%s", optional, want, output)
-			}
-		}
-		if strings.Contains(output, "WARNING") || strings.Contains(output, "Session ready") {
-			t.Errorf("optional %v: the launcher printed while the harness ran:\n%s", optional, output)
-		}
-		if _, err := exec.LookPath("git"); err == nil && (!strings.Contains(output, "told us to quit") || !strings.Contains(output, "gitlab.com is not available in this session: glab issuer request failed")) {
-			t.Errorf("optional %v: Git did not stop at the helper:\n%s", optional, output)
-		}
-		if strings.Contains(output, "glab-secret") {
-			t.Errorf("optional %v: issuer output leaked:\n%s", optional, output)
-		}
-		// The real gh ran with the session's configuration directory and no
-		// token of yours.
-		raw, err := os.ReadFile(filepath.Join(fakes, "gh-called"))
-		if err != nil || !strings.Contains(string(raw), "/geas/sessions/") || !strings.HasSuffix(string(raw), "/gh GH_TOKEN=unset\n") {
-			t.Errorf("optional %v: gh: %q %v", optional, raw, err)
-		}
-		// The issuer's lookup, and nothing after it: no PAT, so nothing to
-		// revoke. The lookup document itself is pinned in internal/provider/gitlab.
-		calls := testutil.Calls(t, fakes)
-		if len(calls) != 1 || len(calls[0]) != 6 || calls[0][3] != "graphql" || !strings.HasPrefix(calls[0][5], "query=query SessionLookup") {
-			t.Errorf("optional %v: glab calls: %q", optional, calls)
-		}
+	}
+	if strings.Contains(output, "WARNING") || strings.Contains(output, "Session ready") {
+		t.Errorf("the launcher printed while the harness ran:\n%s", output)
+	}
+	if _, err := exec.LookPath("git"); err == nil && (!strings.Contains(output, "told us to quit") || !strings.Contains(output, "gitlab.com is not available in this session: glab issuer request failed")) {
+		t.Errorf("Git did not stop at the helper:\n%s", output)
+	}
+	if strings.Contains(output, "glab-secret") {
+		t.Errorf("issuer output leaked:\n%s", output)
+	}
+	// The real gh ran with the session's configuration directory and no
+	// token of yours.
+	raw, err := os.ReadFile(filepath.Join(fakes, "gh-called"))
+	if err != nil || !strings.Contains(string(raw), "/geas/sessions/") || !strings.HasSuffix(string(raw), "/gh GH_TOKEN=unset\n") {
+		t.Errorf("gh: %q %v", raw, err)
+	}
+	// The issuer's lookup, and nothing after it: no PAT, so nothing to
+	// revoke. The lookup document itself is pinned in internal/provider/gitlab.
+	calls := testutil.Calls(t, fakes)
+	if len(calls) != 1 || len(calls[0]) != 6 || calls[0][3] != "graphql" || !strings.HasPrefix(calls[0][5], "query=query SessionLookup") {
+		t.Errorf("glab calls: %q", calls)
 	}
 }
 
@@ -611,12 +605,13 @@ func TestExitCodes(t *testing.T) {
 	// GitHub alone, with no login: it fails in the background, offline.
 	c := testutil.Config()
 	c.SessionHours = 1
-	c.GitLab.Enabled = testutil.Bool(false)
-	c.GitHub.StateFile = filepath.Join(dir, "github.json")
+	c.GitLab = nil
+	c.GitHub[0].StateFile = filepath.Join(dir, "github.json")
+
 	raw, _ := json.Marshal(c)
 	good := filepath.Join(dir, "config.json")
 	invalid := filepath.Join(dir, "invalid.json")
-	if os.WriteFile(good, raw, 0600) != nil || os.WriteFile(invalid, []byte(`{"session_hours": 1, "unknown": true}`), 0600) != nil {
+	if os.WriteFile(good, raw, 0600) != nil || os.WriteFile(invalid, []byte(`{"version": 2, "session_hours": 1, "unknown": true}`), 0600) != nil {
 		t.Fatal("cannot write the configurations")
 	}
 	notADirectory := filepath.Join(dir, "state-file")
@@ -629,14 +624,14 @@ func TestExitCodes(t *testing.T) {
 		output string
 	}{
 		{"no configuration", []string{"--config", filepath.Join(dir, "missing.json"), "run", "--", "true"}, nil, 125, "geas: cannot read configuration\n"},
-		{"invalid configuration", []string{"--config", invalid, "run", "--", "true"}, nil, 125, "geas: invalid configuration JSON\n"},
+		{"invalid configuration", []string{"--config", invalid, "run", "--", "true"}, nil, 125, "geas: unknown field \"unknown\"\n"},
 		{"no harness", []string{"--config", good, "run", "--"}, nil, 125, "geas: specify a harness command after run --\n"},
 		{"no session directory", []string{"--config", good, "run", "--", "true"}, []string{"XDG_STATE_HOME=" + notADirectory}, 125, "geas: local file or permission error\n"},
 		{"harness not found", []string{"--config", good, "run", "--", filepath.Join(dir, "no-such-harness")}, nil, 125, "geas: cannot start harness; check executable and arguments\n"},
 		{"harness exit code", []string{"--config", good, "run", "--", "/bin/sh", "-c", "echo harness; exit 42"}, nil, 42, "harness\n"},
 		{"harness exits 125", []string{"--config", good, "run", "--", "/bin/sh", "-c", "exit 125"}, nil, 125, ""},
 		// Outside run, a configuration error is still 1.
-		{"github-login", []string{"--config", invalid, "github-login"}, nil, 1, "geas: invalid configuration JSON\n"},
+		{"github-login", []string{"--config", invalid, "github-login"}, nil, 1, "geas: unknown field \"unknown\"\n"},
 	} {
 		output, code := runGeas(t, tc.args, tc.env...)
 		if code != tc.code || output != tc.output {

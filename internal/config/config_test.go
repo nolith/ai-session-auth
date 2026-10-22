@@ -12,96 +12,174 @@ import (
 
 // The fixtures other packages share live in internal/testutil; a test of this
 // package cannot import it without a cycle, so it keeps its own.
+func gitlabConfig() GitLabConfig {
+	return GitLabConfig{Host: "gitlab.com", Issuer: Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Projects: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
+}
 func namespacedConfig() GitLabConfig {
-	return GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Groups: []string{"group", "other/sub"}, PersonalProjects: true, Projects: []string{"elsewhere/project"}, Permissions: []string{"read_project", "push_code"}}
-}
-func testConfig() Config {
-	return Config{SessionHours: 24, GitHub: GitHubConfig{ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}, GitLab: GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Repositories: []string{"group/project"}, ProjectIDs: []int64{42}, Scopes: []Scope{{Access: "USER", Permissions: []string{"read_user"}}, {Access: "SELECTED_MEMBERSHIPS", ResourceIDs: []string{"gid://gitlab/Project/42"}, Permissions: []string{"read_project", "push_code"}}}}}
-}
-func glabConfig() GitLabConfig {
-	c := testConfig().GitLab
-	c.Issuer, c.IssuerTokenFile = "glab", ""
+	c := gitlabConfig()
+	c.Groups, c.PersonalProjects, c.Projects = []string{"group", "other/sub"}, true, []string{"elsewhere/project"}
 	return c
 }
+func testConfig() Config {
+	return Config{SessionHours: 24, GitHub: []GitHubConfig{{Host: "github.com", ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}}, GitLab: []GitLabConfig{gitlabConfig()}}
+}
 
-func TestConfigRejectsBroaderScopeAndMissingPaths(t *testing.T) {
+// write writes raw as a configuration file and returns its path.
+func write(t *testing.T, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// load loads c as written by MarshalJSON.
+func load(t *testing.T, c Config) (Config, error) {
+	t.Helper()
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Load(write(t, string(raw)))
+}
+
+func TestLoadVersion2(t *testing.T) {
+	path := write(t, `{
+  "version": 2,
+  "session_hours": 12,
+  "providers": [
+    {"type": "gitlab", "host": "gitlab.com", "issuer": {"type": "bearer", "token_file": "issuer.txt"}, "expected_user": "alice", "groups": ["group"], "permissions": ["read_project"]},
+    {"type": "github", "host": "github.com", "client_id": "app", "expected_user": "alice", "state_file": "~/state/github.json", "owners": ["alice"]}
+  ]
+}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	if c.SessionHours != 12 || len(c.GitLab) != 1 || len(c.GitHub) != 1 || c.Source() != path {
+		t.Fatalf("%+v", c)
+	}
+	if c.GitLab[0].Issuer.TokenFile != filepath.Join(filepath.Dir(path), "issuer.txt") || c.GitHub[0].StateFile != filepath.Join(home, "state", "github.json") {
+		t.Fatalf("paths not expanded: %q %q", c.GitLab[0].Issuer.TokenFile, c.GitHub[0].StateFile)
+	}
+	// session_hours defaults to 24, and what MarshalJSON writes loads back.
+	c.SessionHours = 0
+	again, err := load(t, c)
+	if err != nil || again.SessionHours != 24 || !slices.Equal(again.GitLab[0].Groups, []string{"group"}) || !slices.Equal(again.GitHub[0].Owners, []string{"alice"}) {
+		t.Fatalf("%+v %v", again, err)
+	}
+	// The shipped example must load as it is.
+	if _, err := Load(filepath.Join("..", "..", "config.example.json")); err != nil {
+		t.Fatalf("config.example.json: %v", err)
+	}
+}
+
+// A version 1 file is refused, naming its first version 1 field in the
+// file's order; so is a version 1 field left in a version 2 provider.
+func TestVersion1Refused(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+	}{
+		{`{"session_hours": 24, "github": {"enabled": false}, "gitlab": {"issuer": "glab"}}`, `"github" is a version 1 field: each provider is an entry of "providers" now`},
+		{`{"gitlab": {"issuer": "glab"}, "github": {}}`, `"gitlab" is a version 1 field: each provider is an entry of "providers" now, with "type": "gitlab" and a "host"`},
+		{`{"version": 2, "providers": [{"type": "github", "host": "github.com", "optional": true}]}`, `providers[0]: "optional" is a version 1 field: a provider that fails never stops the session`},
+		{`{"version": 2, "providers": [{"type": "github", "host": "github.com"}, {"type": "gitlab", "enabled": true, "optional": true}]}`, `providers[1]: "enabled" is a version 1 field: leave the provider out instead`},
+		{`{"version": 2, "providers": [{"type": "gitlab", "host": "gitlab.com", "issuer": "glab"}]}`, `providers[0]: "issuer" is a version 1 field: write "issuer": {"type": "glab"}`},
+		{`{"version": 2, "providers": [{"type": "gitlab", "issuer_token_file": "x"}]}`, `providers[0]: "issuer_token_file" is a version 1 field: write "issuer": {"type": "bearer", "token_file": ...}`},
+		{`{"version": 2, "providers": [{"type": "gitlab", "project_ids": [42]}]}`, `providers[0]: "project_ids" is a version 1 field`},
+		{`{"session_hours": 24}`, `the configuration has no "version": write "version": 2`},
+	} {
+		_, err := Load(write(t, tc.raw))
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) || !strings.HasSuffix(err.Error(), `see "Migrating from version 1" in the README`) {
+			t.Errorf("%s: %v", tc.raw, err)
+		}
+	}
+}
+
+func TestVersion2Refusals(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+	}{
+		{`{"version": 3, "providers": []}`, "configuration version 3 is not supported: geas reads version 2"},
+		{`{"version": 2, "providers": []}`, "configure at least one provider"},
+		{`{"version": 2, "providers": [{"type": "ssh"}]}`, `providers[0]: provider type "ssh" is not supported yet`},
+		{`{"version": 2, "providers": [{"type": "bitbucket"}]}`, `providers[0]: unknown provider type "bitbucket"`},
+		{`{"version": 2, "providers": [{"host": "gitlab.com"}]}`, `providers[0] needs a "type": gitlab or github`},
+		{`{"version": 2, "providers": ["gitlab"]}`, `providers[0] must be an object`},
+		{`{"version": 2, "providers": [{"type": "github", "host": "github.com", "groups": ["x"]}]}`, `providers[0]: unknown field "groups"`},
+		{`{"version": 2, "providers": [], "unknown": true}`, `unknown field "unknown"`},
+		{`{"version": 2, "providers": []} {}`, "configuration must contain one JSON object"},
+		{`[]`, "invalid configuration JSON"},
+	} {
+		if _, err := Load(write(t, tc.raw)); err == nil || err.Error() != tc.want {
+			t.Errorf("%s: %v, want %q", tc.raw, err, tc.want)
+		}
+	}
+}
+
+func TestConfigRejectsMissingFields(t *testing.T) {
 	c := testConfig()
 	if err := c.validate(); err != nil {
 		t.Fatal(err)
 	}
-	c.GitLab.Scopes[1].ResourceIDs[0] = "gid://gitlab/Project/99"
-	if c.validate() == nil {
-		t.Fatal("accepted another project")
-	}
-	c = testConfig()
-	c.GitLab.Scopes[1].Permissions = []string{"create_personal_access_token"}
-	if c.validate() == nil {
-		t.Fatal("accepted issuer permissions for agent")
-	}
-	c = testConfig()
-	c.GitHub.StateFile = ""
-	raw, _ := json.Marshal(c)
-	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, raw, 0600)
-	if _, err := Load(path); err == nil {
+	c.GitHub[0].StateFile = ""
+	if _, err := load(t, c); err == nil {
 		t.Fatal("missing path expanded into directory")
 	}
-	c = testConfig()
-	raw, _ = json.Marshal(c)
-	os.WriteFile(path, append(raw, []byte(" {}")...), 0600)
-	if _, err := Load(path); err == nil {
-		t.Fatal("accepted trailing JSON")
-	}
-	// Optional is still accepted, without effect, and never skips the checks.
-	c = testConfig()
-	c.GitHub.Optional, c.GitLab.Optional = true, true
-	raw, _ = json.Marshal(c)
-	os.WriteFile(path, raw, 0600)
-	if _, err := Load(path); err != nil || !strings.Contains(string(raw), `"optional":true`) {
-		t.Fatalf("optional providers: %v", err)
-	}
-	c.GitHub.Repositories = nil
-	if c.validate() == nil {
-		t.Fatal("optional GitHub accepted without an allowlist")
-	}
-	c = testConfig()
-	c.GitLab.Optional, c.GitLab.ExpectedUser = true, ""
-	if c.validate() == nil {
-		t.Fatal("optional GitLab accepted without expected_user")
+	for name, mutate := range map[string]func(*Config){
+		"no session_hours":     func(c *Config) { c.SessionHours = 0 },
+		"too long":             func(c *Config) { c.SessionHours = 49 },
+		"no providers":         func(c *Config) { c.GitLab, c.GitHub = nil, nil },
+		"GitHub elsewhere":     func(c *Config) { c.GitHub[0].Host = "github.example.com" },
+		"GitHub without host":  func(c *Config) { c.GitHub[0].Host = "" },
+		"two GitHubs":          func(c *Config) { c.GitHub = append(c.GitHub, c.GitHub[0]) },
+		"two gitlab.com":       func(c *Config) { c.GitLab = append(c.GitLab, c.GitLab[0]) },
+		"GitLab without host":  func(c *Config) { c.GitLab[0].Host = "" },
+		"GitLab without user":  func(c *Config) { c.GitLab[0].ExpectedUser = "" },
+		"GitHub without users": func(c *Config) { c.GitHub[0].ExpectedUser = "" },
+	} {
+		c := testConfig()
+		mutate(&c)
+		if c.validate() == nil {
+			t.Errorf("accepted %s", name)
+		}
 	}
 }
+
 func TestGitHubOwnersConfig(t *testing.T) {
 	c := testConfig()
-	c.GitHub.Repositories, c.GitHub.Owners = nil, []string{"nolith", "some-org"}
+	g := &c.GitHub[0]
+	g.Repositories, g.Owners = nil, []string{"nolith", "some-org"}
 	if err := c.validate(); err != nil {
 		t.Fatalf("owners alone: %v", err)
 	}
-	c.GitHub.Repositories = []string{"alice/repo"}
+	g.Repositories = []string{"alice/repo"}
 	if err := c.validate(); err != nil {
 		t.Fatalf("owners and repositories: %v", err)
 	}
-	c.GitHub.Repositories, c.GitHub.Owners = nil, nil
+	g.Repositories, g.Owners = nil, nil
 	if err := c.validate(); err == nil || err.Error() != "configure GitHub repositories or owners" {
 		t.Fatalf("no allowlist: %v", err)
 	}
 	for _, owner := range []string{"", "nolith/repo", "nolith/", "/nolith", "*", "noli*", "nolith:x", ".", "..", "no lith\n", "nolith.git", "nolith%2f"} {
-		c.GitHub.Owners = []string{owner}
+		g.Owners = []string{owner}
 		if c.validate() == nil {
 			t.Errorf("accepted owner %q", owner)
 		}
 	}
-	c.GitHub.Owners = []string{"nolith", "Nolith"}
+	g.Owners = []string{"nolith", "Nolith"}
 	if c.validate() == nil {
 		t.Fatal("accepted the same owner twice in another case")
 	}
 	// Loaded from JSON, as written in a configuration.
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := []byte(`{"github":{"client_id":"app","expected_user":"alice","state_file":"state.json","owners":["nolith"]},"gitlab":{"enabled":false}}`)
-	os.WriteFile(path, raw, 0600)
-	if loaded, err := Load(path); err != nil || !slices.Equal(loaded.GitHub.Owners, []string{"nolith"}) {
-		t.Fatalf("%+v %v", loaded.GitHub, err)
+	raw := `{"version": 2, "providers": [{"type": "github", "host": "github.com", "client_id": "app", "expected_user": "alice", "state_file": "state.json", "owners": ["nolith"]}]}`
+	if loaded, err := Load(write(t, raw)); err != nil || len(loaded.GitLab) != 0 || !slices.Equal(loaded.GitHub[0].Owners, []string{"nolith"}) {
+		t.Fatalf("%+v %v", loaded, err)
 	}
 }
+
 func TestExpiryCoversSessionAtUTCMidnight(t *testing.T) {
 	for _, tc := range []struct {
 		now   string
@@ -119,45 +197,36 @@ func TestExpiryCoversSessionAtUTCMidnight(t *testing.T) {
 	}
 }
 
-// TestGlabIssuerConfig checks the issuer that has no file at all: "glab" and
-// issuer_token_file are mutually exclusive, and nothing is expanded for it.
-func TestGlabIssuerConfig(t *testing.T) {
+// TestIssuerConfig checks both issuers: glab, which has no file at all and
+// nothing to expand, and bearer, which needs its token_file.
+func TestIssuerConfig(t *testing.T) {
 	c := testConfig()
-	c.GitLab = glabConfig()
-	if err := c.validate(); err != nil {
-		t.Fatal(err)
+	c.GitLab[0].Issuer = Issuer{Type: "glab"}
+	loaded, err := load(t, c)
+	if err != nil || loaded.GitLab[0].Issuer.TokenFile != "" {
+		t.Fatalf("%q %v", loaded.GitLab[0].Issuer.TokenFile, err)
 	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw, _ := json.Marshal(c)
-	os.WriteFile(path, raw, 0600)
-	loaded, err := Load(path)
-	if err != nil || loaded.GitLab.IssuerTokenFile != "" {
-		t.Fatalf("%q %v", loaded.GitLab.IssuerTokenFile, err)
-	}
-	for _, mutate := range []func(*GitLabConfig){
-		func(g *GitLabConfig) { g.IssuerTokenFile = "issuer.txt" },
-		func(g *GitLabConfig) { g.Issuer = "file" },
-		func(g *GitLabConfig) { g.Issuer = "" },
+	for _, issuer := range []Issuer{
+		{Type: "glab", TokenFile: "issuer.txt"},
+		{Type: "bearer"},
+		{Type: "file", TokenFile: "issuer.txt"},
+		{TokenFile: "issuer.txt"},
 	} {
 		c = testConfig()
-		c.GitLab = glabConfig()
-		mutate(&c.GitLab)
+		c.GitLab[0].Issuer = issuer
 		if c.validate() == nil {
-			t.Fatalf("accepted issuer %q with issuer_token_file %q", c.GitLab.Issuer, c.GitLab.IssuerTokenFile)
+			t.Errorf("accepted issuer %+v", issuer)
 		}
 	}
 }
 
 func TestGitLabNamespacedConfig(t *testing.T) {
 	c := testConfig()
-	c.GitLab = namespacedConfig()
+	c.GitLab[0] = namespacedConfig()
 	if err := c.validate(); err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*GitLabConfig){
-		"mixed with repositories":     func(g *GitLabConfig) { g.Repositories = []string{"group/project"} },
-		"mixed with project_ids":      func(g *GitLabConfig) { g.ProjectIDs = []int64{42} },
-		"mixed with granular_scopes":  func(g *GitLabConfig) { g.Scopes = testConfig().GitLab.Scopes },
 		"no namespace":                func(g *GitLabConfig) { g.Groups, g.PersonalProjects, g.Projects = nil, false, nil },
 		"no permissions":              func(g *GitLabConfig) { g.Permissions = nil },
 		"PAT management":              func(g *GitLabConfig) { g.Permissions = append(g.Permissions, "revoke_personal_access_token") },
@@ -168,22 +237,26 @@ func TestGitLabNamespacedConfig(t *testing.T) {
 		"project without namespace":   func(g *GitLabConfig) { g.Projects = []string{"project"} },
 	} {
 		c := testConfig()
-		c.GitLab = namespacedConfig()
-		mutate(&c.GitLab)
+		c.GitLab[0] = namespacedConfig()
+		mutate(&c.GitLab[0])
 		if c.validate() == nil {
 			t.Errorf("accepted %s", name)
 		}
 	}
-	// The earlier format can never ask for every membership or the instance.
-	for _, access := range []string{"ALL_MEMBERSHIPS", "INSTANCE", "PERSONAL_PROJECTS"} {
-		c := testConfig()
-		c.GitLab.Scopes = append(c.GitLab.Scopes, Scope{Access: access, Permissions: []string{"read_project"}})
-		if c.validate() == nil {
-			t.Errorf("accepted %s", access)
-		}
+}
+
+// The default path follows XDG_CONFIG_HOME, else ~/.config, on macOS too.
+func TestDefaultPath(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/xdg")
+	if got, err := DefaultPath(); err != nil || got != "/xdg/geas/config.json" {
+		t.Fatalf("%q %v", got, err)
 	}
-	// The shipped example must load as it is.
-	if _, err := Load(filepath.Join("..", "..", "config.example.json")); err != nil {
-		t.Fatalf("config.example.json: %v", err)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, xdg := range []string{"", "relative"} {
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		if got, err := DefaultPath(); err != nil || got != filepath.Join(home, ".config", "geas", "config.json") {
+			t.Fatalf("XDG_CONFIG_HOME %q: %q %v", xdg, got, err)
+		}
 	}
 }

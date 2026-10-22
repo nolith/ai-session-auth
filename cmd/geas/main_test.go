@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/sandbox"
 	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/testutil"
@@ -18,13 +19,21 @@ import (
 // Refused before reading stdin or touching any file.
 func TestSaveGitLabIssuerRefusedWithGlabIssuer(t *testing.T) {
 	c := testutil.Config()
-	c.GitLab = testutil.GlabConfig()
+	c.GitLab = []config.GitLabConfig{testutil.GlabConfig()}
 	path := filepath.Join(t.TempDir(), "config.json")
 	raw, _ := json.Marshal(c)
 	os.WriteFile(path, raw, 0600)
 	code, err := execute(context.Background(), []string{"--config", path, "save-gitlab-issuer", "--stdin"}, nil)
 	if code != 1 || err == nil || !strings.Contains(err.Error(), "glab") {
 		t.Fatalf("save-gitlab-issuer: %d %v", code, err)
+	}
+	code, err = execute(context.Background(), []string{"--config", path, "save-gitlab-issuer", "--host", "gitlab.com", "--stdin"}, nil)
+	if code != 1 || err == nil || err.Error() != `the issuer of gitlab.com is "glab": your glab login, with no PAT to save` {
+		t.Fatalf("save-gitlab-issuer --host: %d %v", code, err)
+	}
+	code, err = execute(context.Background(), []string{"--config", path, "save-gitlab-issuer", "--host", "ops.gitlab.net"}, nil)
+	if code != 1 || err == nil || err.Error() != "no gitlab provider for ops.gitlab.net in the configuration" {
+		t.Fatalf("save-gitlab-issuer for another host: %d %v", code, err)
 	}
 }
 
@@ -98,5 +107,41 @@ func TestStatus(t *testing.T) {
 	t.Setenv("GEAS_SESSION_DIR", "")
 	if code, err := execute(context.Background(), []string{"status"}, nil); code != 1 || err == nil || !strings.Contains(err.Error(), "not inside a geas session") {
 		t.Fatalf("outside a session: %d %v", code, err)
+	}
+}
+
+// geas config check lists a configuration's providers, and names the first
+// version 1 field of a configuration in the earlier format; geas run refuses
+// that one with exit code 125. Without --config, the configuration is under
+// XDG_CONFIG_HOME.
+func TestConfigCheck(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	path := filepath.Join(xdg, "geas", "config.json")
+	os.MkdirAll(filepath.Dir(path), 0700)
+	raw, _ := json.Marshal(testutil.Config())
+	os.WriteFile(path, raw, 0600)
+	stdout := os.Stdout
+	captured, _ := os.CreateTemp(t.TempDir(), "stdout")
+	os.Stdout = captured
+	code, err := execute(context.Background(), []string{"config", "check"}, nil)
+	os.Stdout = stdout
+	out, _ := os.ReadFile(captured.Name())
+	want := path + ": version 2, session_hours 24\n  gitlab:gitlab.com  issuer bearer, as alice\n  github:github.com  as alice\n"
+	if code != 0 || err != nil || string(out) != want {
+		t.Fatalf("%d %v:\n%s", code, err, out)
+	}
+	if code, err := execute(context.Background(), []string{"config", "show"}, nil); code != 2 || err == nil {
+		t.Fatalf("config show: %d %v", code, err)
+	}
+	v1 := filepath.Join(t.TempDir(), "v1.json")
+	os.WriteFile(v1, []byte(`{"session_hours": 24, "gitlab": {"issuer": "glab"}, "github": {"enabled": false}}`), 0600)
+	code, err = execute(context.Background(), []string{"--config", v1, "config", "check"}, nil)
+	if code != 1 || err == nil || !strings.HasPrefix(err.Error(), `"gitlab" is a version 1 field`) {
+		t.Fatalf("version 1: %d %v", code, err)
+	}
+	code, err = execute(context.Background(), []string{"--config", v1, "run", "--", "true"}, nil)
+	if code != 125 || err == nil || !strings.HasPrefix(err.Error(), `"gitlab" is a version 1 field`) {
+		t.Fatalf("run with version 1: %d %v", code, err)
 	}
 }

@@ -56,10 +56,10 @@ func TestSetup(t *testing.T) {
 	if g.Host != "gitlab.com" || g.Username != "oauth2" || g.FoldCase || len(g.Namespaces) != 3 || g.Namespaces[2] != "alice" || len(g.Repositories) != 1 || g.Repositories[0] != "elsewhere/project" {
 		t.Fatalf("git host %+v", g)
 	}
-	// The earlier format lists exact repositories only.
-	p = &Provider{Config: testutil.Config().GitLab}
+	// Projects alone are exact repositories.
+	p = &Provider{Config: testutil.GitLab()}
 	if g := p.Setup().Git[0]; len(g.Namespaces) != 0 || len(g.Repositories) != 1 || g.Repositories[0] != "group/project" {
-		t.Fatalf("earlier format: %+v", g)
+		t.Fatalf("projects alone: %+v", g)
 	}
 }
 
@@ -102,8 +102,9 @@ func TestProtect(t *testing.T) {
 		t.Fatalf("glab issuer: %q, want %q", got, want)
 	}
 	t.Setenv("GLAB_CONFIG_DIR", "/elsewhere/glab")
-	c := testutil.Config().GitLab
-	c.IssuerTokenFile = "/state/issuer.txt"
+	c := testutil.GitLab()
+	c.Issuer.TokenFile = "/state/issuer.txt"
+
 	if got := (&Provider{Config: c}).Setup().Protect; len(got) != 2 || got[0] != "/elsewhere/glab" || got[1] != "/state/issuer.txt" {
 		t.Fatalf("bearer issuer: %q", got)
 	}

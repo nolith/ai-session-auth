@@ -48,9 +48,9 @@ func graphqlPayload(t *testing.T, r *http.Request) (string, map[string]json.RawM
 
 // lookupAnswers answers the lookup document as GitLab would: every group or
 // project alias resolves to the node answers holds for its path, and a path
-// with no node resolves to null. The earlier format's projects(ids:) alias
-// resolves to ids instead. The test fails on an alias it did not expect.
-func lookupAnswers(t *testing.T, query, user string, answers map[string]any, ids []any) map[string]any {
+// with no node resolves to null. The test fails on an alias it did not
+// expect.
+func lookupAnswers(t *testing.T, query, user string, answers map[string]any) map[string]any {
 	t.Helper()
 	data := map[string]any{"currentUser": map[string]any{"username": user}}
 	for _, match := range lookupAlias.FindAllStringSubmatch(query, -1) {
@@ -64,9 +64,6 @@ func lookupAnswers(t *testing.T, query, user string, answers map[string]any, ids
 			t.Errorf("the document asks for %s %s, which the test does not answer", kind, path)
 		}
 		data[alias] = node
-	}
-	if strings.Contains(query, "projects(ids:") {
-		data["l0"] = map[string]any{"nodes": ids}
 	}
 	return data
 }
@@ -127,7 +124,7 @@ func patAnswer(t *testing.T, query string) map[string]any {
 // issuerAnswer answers every document the issuer sends as GitLab would: the
 // lookup, the id lookup, and the mint. It reports the mint, so the caller can
 // read the input whose name and scopes it wants to check.
-func issuerAnswer(t *testing.T, query, user string, answers map[string]any, ids []any) (minted bool, answer any) {
+func issuerAnswer(t *testing.T, query, user string, answers map[string]any) (minted bool, answer any) {
 	t.Helper()
 	switch {
 	case strings.Contains(query, "personalAccessTokenCreate"):
@@ -135,16 +132,15 @@ func issuerAnswer(t *testing.T, query, user string, answers map[string]any, ids 
 	case strings.Contains(query, "personalAccessTokens(search:"):
 		return false, patAnswer(t, query)
 	}
-	return false, map[string]any{"data": lookupAnswers(t, query, user, answers, ids)}
+	return false, map[string]any{"data": lookupAnswers(t, query, user, answers)}
 }
 
 func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
-	c := testutil.Config().GitLab
+	c := testutil.GitLab()
 	name := ""
 	deleted := false
 	book := testLedger(t)
-	// The earlier format resolves its project IDs, then checks the paths.
-	ids := []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}}
+	answers := map[string]any{"group/project": map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}}
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		if r.Header.Get("Authorization") != "Bearer issuer" {
 			t.Error("incorrect credential")
@@ -156,7 +152,7 @@ func TestGitLabCreateAndRevokeExactPAT(t *testing.T) {
 			if strings.Contains(query, "personalAccessTokens(search:") && patName(t, query) != name {
 				t.Errorf("the id lookup asks for %q, the session PAT is %q", patName(t, query), name)
 			}
-			minted, answer := issuerAnswer(t, query, "alice", nil, ids)
+			minted, answer := issuerAnswer(t, query, "alice", answers)
 			if !minted {
 				return 200, answer
 			}
@@ -217,10 +213,10 @@ func TestGitLabProjectMismatchStopsBeforeMint(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
-		minted, answer = issuerAnswer(t, query, "alice", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
+		minted, answer = issuerAnswer(t, query, "alice", map[string]any{"group/project": map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "wrong/project"}})
 		return 200, answer
 	})
-	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
+	g := &Provider{Config: testutil.GitLab(), Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), book, time.Hour); err == nil || minted {
 		t.Fatal("minted for wrong project")
 	}
@@ -232,10 +228,10 @@ func TestGitLabUserMismatchStopsBeforeMint(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) {
 		query, _ := graphqlPayload(t, r)
 		var answer any
-		minted, answer = issuerAnswer(t, query, "someone-else", nil, []any{map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
+		minted, answer = issuerAnswer(t, query, "someone-else", map[string]any{"group/project": map[string]any{"id": "gid://gitlab/Project/42", "fullPath": "group/project"}})
 		return 200, answer
 	})
-	g := &Provider{Config: testutil.Config().GitLab, Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
+	g := &Provider{Config: testutil.GitLab(), Issuer: bearerIssuer{client: api, token: "issuer"}, Now: time.Now}
 	if _, err := g.create(context.Background(), book, time.Hour); err == nil || minted {
 		t.Fatal("minted for another user")
 	}
@@ -434,16 +430,6 @@ func TestLookupDocument(t *testing.T) {
 	if got := lookupDocument(c); got != want {
 		t.Fatalf("document:\n%s", got)
 	}
-	// The earlier format asks for its project IDs, one node per ID.
-	c = testutil.Config().GitLab
-	want = `query SessionLookup {
-  currentUser { username }
-  l0: projects(ids: ["gid://gitlab/Project/42"]) { nodes { id fullPath } }
-}
-`
-	if got := lookupDocument(c); got != want {
-		t.Fatalf("earlier format:\n%s", got)
-	}
 	// A quote in a path would end the string literal, so it is escaped.
 	c = config.GitLabConfig{Groups: []string{`group"x`}}
 	if got, want := lookupDocument(c), `g0: group(fullPath: "group\"x")`; !strings.Contains(got, want) {
@@ -467,7 +453,7 @@ func TestGitLabNamespacedScopes(t *testing.T) {
 			if strings.Contains(query, "personalAccessTokens(search:") {
 				return 200, patAnswer(t, query)
 			}
-			minted, answer := issuerAnswer(t, query, "alice", answers, nil)
+			minted, answer := issuerAnswer(t, query, "alice", answers)
 			if !minted {
 				lookups++
 				return 200, answer
@@ -532,7 +518,7 @@ func TestGitLabNamespaceMismatchStopsBeforeMint(t *testing.T) {
 		api := mockAPI(t, func(r *http.Request) (int, any) {
 			query, _ := graphqlPayload(t, r)
 			var answer any
-			minted, answer = issuerAnswer(t, query, "alice", map[string]any{"group": tc.answer}, nil)
+			minted, answer = issuerAnswer(t, query, "alice", map[string]any{"group": tc.answer})
 			return 200, answer
 		})
 		c := testutil.NamespacedConfig()
@@ -566,7 +552,8 @@ func TestRefusedMintSettlesItsEntry(t *testing.T) {
 			if strings.Contains(query, "personalAccessTokenCreate") {
 				return tc.mint()
 			}
-			_, answer := issuerAnswer(t, query, "alice", map[string]any{"group": map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "group"}}, nil)
+			_, answer := issuerAnswer(t, query, "alice", map[string]any{"group": map[string]any{"id": "gid://gitlab/Group/7", "fullPath": "group"}})
+
 			return 200, answer
 		})
 		c := testutil.NamespacedConfig()

@@ -232,24 +232,24 @@ func mark(dir *sessiondir.Dir, id, state, reason string) error {
 	return dir.SetMarker(id, sessiondir.Marker{State: state, Reason: reason, Time: time.Now().UTC()})
 }
 
-// plan builds the enabled providers from the configuration, without a
-// network call. A provider that cannot even be prepared, such as GitLab
-// without glab or with an unreadable issuer file, is kept for its setup and
-// configuration, and failed lists why: it never acquires anything, and the
-// session starts all the same.
+// plan builds the configured providers, without a network call. A provider
+// that cannot even be prepared, such as GitLab without glab or with an
+// unreadable issuer file, is kept for its setup and configuration, and failed
+// lists why: it never acquires anything, and the session starts all the
+// same.
 func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers []provider.Provider, failed map[string]string) {
 	failed = map[string]string{}
-	if config.Enabled(settings.GitLab.Enabled) {
-		gl, err := gitlab.New(settings.GitLab, settings.Duration(), api, nil)
+	for _, c := range settings.GitLab {
+		gl, err := gitlab.New(c, settings.Duration(), api, nil)
 		if err != nil {
-			gl = &gitlab.Provider{Config: settings.GitLab}
+			gl = &gitlab.Provider{Config: c}
 			failed[gl.ID()] = reason(err)
 		}
 		gl.Steps = timer.Child(gl.ID())
 		providers = append(providers, gl)
 	}
-	if config.Enabled(settings.GitHub.Enabled) {
-		providers = append(providers, github.New(settings.GitHub, api))
+	for _, c := range settings.GitHub {
+		providers = append(providers, github.New(c, api))
 	}
 	return providers, failed
 }

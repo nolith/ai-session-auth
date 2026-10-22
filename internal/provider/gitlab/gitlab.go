@@ -164,14 +164,14 @@ type Provider struct {
 // New returns the provider for one GitLab host, whose session PATs last for
 // duration. It reads the issuer's credential, or finds glab, but calls nothing.
 func New(host config.GitLabConfig, duration time.Duration, a *api.API, steps *timing.Timer) (*Provider, error) {
-	if host.Issuer == "glab" {
+	if host.Issuer.Type == "glab" {
 		glab, err := newGlabIssuer()
 		if err != nil {
 			return nil, err
 		}
 		return &Provider{Config: host, Issuer: glab, Duration: duration, Now: time.Now, Steps: steps}, nil
 	}
-	raw, err := secretfile.Read(host.IssuerTokenFile)
+	raw, err := secretfile.Read(host.Issuer.TokenFile)
 	if err != nil {
 		return nil, err
 	}
@@ -206,17 +206,16 @@ func (g *Provider) Setup() provider.Setup {
 	if dir, err := glabConfigDir(os.Getenv, os.UserConfigDir); err == nil {
 		protect = append(protect, dir)
 	}
-	if g.Config.IssuerTokenFile != "" {
-		protect = append(protect, g.Config.IssuerTokenFile)
+	if g.Config.Issuer.TokenFile != "" {
+		protect = append(protect, g.Config.Issuer.TokenFile)
 	}
 	return provider.Setup{
 		Env: map[string]string{"GLAB_CONFIG_DIR": "$GEAS_SESSION_DIR/" + configDir},
 		Git: []provider.GitHost{{
-			Host:       host,
-			Username:   "oauth2",
-			Namespaces: namespaces,
-			// The projects, or the earlier format's repositories.
-			Repositories: append(slices.Clone(g.Config.Projects), g.Config.Repositories...),
+			Host:         host,
+			Username:     "oauth2",
+			Namespaces:   namespaces,
+			Repositories: slices.Clone(g.Config.Projects),
 		}},
 		Protect: protect,
 	}
@@ -372,10 +371,9 @@ type namespace struct {
 }
 
 // lookupDocument builds the one aliased query that replaces the REST user call
-// and the per-namespace lookups: currentUser for the identity check, one
-// group(fullPath:) or project(fullPath:) alias per configured path, and
-// projects(ids:) for the earlier format. GraphQL never embeds a group's
-// projects, so the 6 s REST answer disappears with it.
+// and the per-namespace lookups: currentUser for the identity check, and one
+// group(fullPath:) or project(fullPath:) alias per configured path. GraphQL
+// never embeds a group's projects, so the 6 s REST answer disappears with it.
 //
 // The paths are written into the document as escaped string literals: an alias
 // needs one literal argument each, and the glab issuer carries only objects and
@@ -383,13 +381,6 @@ type namespace struct {
 func lookupDocument(c config.GitLabConfig) string {
 	var b strings.Builder
 	b.WriteString("query SessionLookup {\n  currentUser { username }\n")
-	if !c.Namespaced() {
-		ids := make([]string, 0, len(c.ProjectIDs))
-		for _, id := range c.ProjectIDs {
-			ids = append(ids, graphqlString(fmt.Sprintf("gid://gitlab/Project/%d", id)))
-		}
-		fmt.Fprintf(&b, "  l0: projects(ids: [%s]) { nodes { id fullPath } }\n", strings.Join(ids, ", "))
-	}
 	for i, path := range c.Groups {
 		fmt.Fprintf(&b, "  g%d: group(fullPath: %s) { id fullPath }\n", i, graphqlString(path))
 	}
@@ -419,8 +410,7 @@ func parseGlobalID(value, model string) (int64, error) {
 }
 
 // lookup resolves the user and every configured namespace in one request, and
-// refuses a path that does not resolve, as the REST lookups did. The earlier
-// format resolves its project IDs instead.
+// refuses a path that does not resolve, as the REST lookups did.
 func (g *Provider) lookup(ctx context.Context) (lookup, error) {
 	var answer struct {
 		Errors []any                      `json:"errors"`
@@ -439,14 +429,6 @@ func (g *Provider) lookup(ctx context.Context) (lookup, error) {
 		return lookup{}, err
 	}
 	resolved := lookup{user: user.Username}
-	if !g.Config.Namespaced() {
-		projects, err := projectNodes(answer.Data)
-		if err != nil {
-			return lookup{}, err
-		}
-		resolved.projects = projects
-		return resolved, nil
-	}
 	for i, path := range g.Config.Groups {
 		node, err := pathNode(answer.Data, fmt.Sprintf("g%d", i), "Group", path)
 		if err != nil {
@@ -497,47 +479,10 @@ func pathNode(data map[string]json.RawMessage, alias, model, path string) (names
 	return namespace{id: node.ID, fullPath: node.FullPath}, nil
 }
 
-// projectNodes resolves the earlier format's projects(ids:), one node per ID.
-func projectNodes(data map[string]json.RawMessage) ([]namespace, error) {
-	var answer struct {
-		Nodes []struct {
-			ID       string `json:"id"`
-			FullPath string `json:"fullPath"`
-		} `json:"nodes"`
-	}
-	if err := decodeAlias(data, "l0", "project IDs", &answer); err != nil {
-		return nil, err
-	}
-	projects := make([]namespace, 0, len(answer.Nodes))
-	for _, node := range answer.Nodes {
-		if _, err := parseGlobalID(node.ID, "Project"); err != nil || node.FullPath == "" {
-			return nil, errors.New("GitLab project IDs resolve to an unexpected answer; update the allowlist")
-		}
-		projects = append(projects, namespace{id: node.ID, fullPath: node.FullPath})
-	}
-	return projects, nil
-}
-
 // scopes returns the session PAT's scopes from the resolved namespaces. Groups
 // and projects are refused unless GitLab reported the same path, so a renamed
-// or mistyped namespace stops the session before any PAT exists. The earlier
-// format lists project IDs and scopes itself; only the paths are checked.
+// or mistyped namespace stops the session before any PAT exists.
 func (g *Provider) scopes(resolved lookup) ([]config.Scope, error) {
-	if !g.Config.Namespaced() {
-		paths := map[string]bool{}
-		for _, project := range resolved.projects {
-			paths[project.fullPath] = true
-		}
-		if len(paths) != len(g.Config.Repositories) {
-			return nil, errors.New("GitLab project IDs do not match repository allowlist")
-		}
-		for _, repo := range g.Config.Repositories {
-			if !paths[repo] {
-				return nil, errors.New("GitLab project IDs do not match repository allowlist")
-			}
-		}
-		return g.Config.Scopes, nil
-	}
 	allowed := map[string]bool{}
 	var ids []string
 	for _, namespaces := range [][]namespace{resolved.groups, resolved.projects} {

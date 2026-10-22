@@ -26,9 +26,15 @@ import (
 func usage(output io.Writer) {
 	fmt.Fprintln(output, `Usage: geas [--config config.json] COMMAND
 
+The configuration defaults to $XDG_CONFIG_HOME/geas/config.json, else
+~/.config/geas/config.json.
+
 Commands:
   github-login                  Authorize your GitHub App once via device flow
-  save-gitlab-issuer [--stdin]   Store an issuer PAT with mode 600 (not with issuer "glab")
+  save-gitlab-issuer [--host HOST] [--stdin]
+                                Store the issuer PAT of a GitLab host whose issuer
+                                is "bearer", with mode 600
+  config check                  Check the configuration and list its providers
   run -- HARNESS [ARGS...]       Start a session with user credentials; inside a
                                 session, run HARNESS in it
   credential get                Git's credential helper, inside a session
@@ -65,7 +71,7 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	}
 	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	path := flags.String("config", "config.json", "configuration path")
+	path := flags.String("config", "", "configuration path (default $XDG_CONFIG_HOME/geas/config.json)")
 	flags.Usage = func() { usage(os.Stderr) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -85,6 +91,14 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		return session.ExitNotStarted, session.Nested(harness(rest[1:]))
 	}
 	timer := timing.New(os.Getenv("GEAS_DEBUG"), os.Stderr)
+	if *path == "" {
+		var err error
+		if *path, err = config.DefaultPath(); err != nil && rest[0] == "run" {
+			return session.ExitNotStarted, err
+		} else if err != nil {
+			return 1, err
+		}
+	}
 	settings, err := config.Load(*path)
 	timer.Step("config load")
 	if err != nil && rest[0] == "run" {
@@ -95,34 +109,75 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	}
 	switch rest[0] {
 	case "github-login":
-		if !config.Enabled(settings.GitHub.Enabled) {
-			return 1, errors.New("GitHub is disabled")
+		if len(settings.GitHub) == 0 {
+			return 1, errors.New("no github provider in the configuration")
 		}
-		return 0, github.New(settings.GitHub, api).Login(ctx, os.Stdout)
+		return 0, github.New(settings.GitHub[0], api).Login(ctx, os.Stdout)
 	case "save-gitlab-issuer":
-		if !config.Enabled(settings.GitLab.Enabled) {
-			return 1, errors.New("GitLab is disabled")
+		return saveGitLabIssuer(ctx, settings, rest[1:])
+	case "config":
+		if len(rest) != 2 || rest[1] != "check" {
+			return 2, errors.New("usage: geas config check")
 		}
-		if settings.GitLab.Issuer == "glab" {
-			return 1, errors.New(`GitLab issuer is "glab": your glab login, with no PAT to save`)
-		}
-		fromStdin := len(rest) == 2 && rest[1] == "--stdin"
-		if len(rest) > 1 && !fromStdin {
-			return 2, errors.New("only --stdin is supported for save-gitlab-issuer")
-		}
-		token, err := session.ReadIssuer(ctx, os.Stdin, os.Stderr, fromStdin)
-		if err != nil {
-			return 1, err
-		}
-		if err = secretfile.Write(settings.GitLab.IssuerTokenFile, []byte(token+"\n")); err != nil {
-			return 1, errors.New("cannot save GitLab issuer")
-		}
-		fmt.Fprintln(os.Stdout, "Issuer saved with mode 600.")
+		configCheck(os.Stdout, *path, settings)
 		return 0, nil
 	case "run":
 		return session.Run(ctx, settings, harness(rest[1:]), api, os.Stderr, timer)
 	default:
 		return 2, errors.New("unknown command")
+	}
+}
+
+// saveGitLabIssuer stores the issuer PAT of the GitLab provider --host names,
+// or of the only one whose issuer is "bearer".
+func saveGitLabIssuer(ctx context.Context, settings config.Config, args []string) (int, error) {
+	flags := flag.NewFlagSet("save-gitlab-issuer", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	host := flags.String("host", "", "")
+	fromStdin := flags.Bool("stdin", false, "")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return 2, errors.New("usage: geas save-gitlab-issuer [--host HOST] [--stdin]")
+	}
+	var bearer []config.GitLabConfig
+	for _, g := range settings.GitLab {
+		if *host != "" && g.Host != *host {
+			continue
+		}
+		if g.Issuer.Type == "bearer" {
+			bearer = append(bearer, g)
+		} else if *host != "" {
+			return 1, errors.New(`the issuer of ` + g.Host + ` is "glab": your glab login, with no PAT to save`)
+		}
+	}
+	switch {
+	case len(bearer) == 0 && *host != "":
+		return 1, errors.New("no gitlab provider for " + *host + " in the configuration")
+	case len(bearer) == 0:
+		return 1, errors.New(`no gitlab provider has a "bearer" issuer: a glab login has no PAT to save`)
+	case len(bearer) > 1:
+		return 1, errors.New("several gitlab providers have a bearer issuer: choose one with --host")
+	}
+	token, err := session.ReadIssuer(ctx, os.Stdin, os.Stderr, *fromStdin)
+	if err != nil {
+		return 1, err
+	}
+	if err = secretfile.Write(bearer[0].Issuer.TokenFile, []byte(token+"\n")); err != nil {
+		return 1, errors.New("cannot save GitLab issuer")
+	}
+	fmt.Fprintln(os.Stdout, "Issuer for "+bearer[0].Host+" saved with mode 600.")
+	return 0, nil
+}
+
+// configCheck reports a configuration that loaded, with its providers. An
+// invalid one never gets here: Load's error names what is wrong, such as the
+// first version 1 field.
+func configCheck(output io.Writer, path string, settings config.Config) {
+	fmt.Fprintf(output, "%s: version %d, session_hours %g\n", path, config.Version, settings.SessionHours)
+	for _, g := range settings.GitLab {
+		fmt.Fprintf(output, "  gitlab:%s  issuer %s, as %s\n", g.Host, g.Issuer.Type, g.ExpectedUser)
+	}
+	for _, g := range settings.GitHub {
+		fmt.Fprintf(output, "  github:%s  as %s\n", g.Host, g.ExpectedUser)
 	}
 }
 

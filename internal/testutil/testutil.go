@@ -24,23 +24,36 @@ import (
 // Bool returns a pointer to v, for the *bool enabled fields of a provider.
 func Bool(v bool) *bool { return &v }
 
-// Config is a valid configuration in the earlier GitLab format, with GitHub
-// and GitLab both enabled.
+// Config is a valid configuration with a GitLab and a GitHub provider, GitLab()
+// and GitHub().
 func Config() config.Config {
-	return config.Config{SessionHours: 24, GitHub: config.GitHubConfig{ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}, GitLab: config.GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Repositories: []string{"group/project"}, ProjectIDs: []int64{42}, Scopes: []config.Scope{{Access: "USER", Permissions: []string{"read_user"}}, {Access: "SELECTED_MEMBERSHIPS", ResourceIDs: []string{"gid://gitlab/Project/42"}, Permissions: []string{"read_project", "push_code"}}}}}
+	return config.Config{SessionHours: 24, GitLab: []config.GitLabConfig{GitLab()}, GitHub: []config.GitHubConfig{GitHub()}}
+}
+
+// GitLab is gitlab.com with a stored issuer PAT, allowing the one project the
+// fake glab answers for, group/project (ID 42).
+func GitLab() config.GitLabConfig {
+	return config.GitLabConfig{Host: "gitlab.com", Issuer: config.Issuer{Type: "bearer", TokenFile: "issuer.txt"}, ExpectedUser: "alice", Projects: []string{"group/project"}, Permissions: []string{"read_project", "push_code"}}
+}
+
+// GitHub is github.com for alice, allowing alice/repo.
+func GitHub() config.GitHubConfig {
+	return config.GitHubConfig{Host: "github.com", ClientID: "app", ExpectedUser: "alice", StateFile: "state.json", Repositories: []string{"alice/repo"}}
 }
 
 // NamespacedConfig allows two groups (one a subgroup), alice's personal
 // projects and one project elsewhere.
 func NamespacedConfig() config.GitLabConfig {
-	return config.GitLabConfig{ExpectedUser: "alice", IssuerTokenFile: "issuer.txt", Groups: []string{"group", "other/sub"}, PersonalProjects: true, Projects: []string{"elsewhere/project"}, Permissions: []string{"read_project", "push_code"}}
+	c := GitLab()
+	c.Groups, c.PersonalProjects, c.Projects = []string{"group", "other/sub"}, true, []string{"elsewhere/project"}
+	return c
 }
 
-// GlabConfig is Config's GitLab half with the glab issuer, which needs no
-// token file at all.
+// GlabConfig is GitLab() with the glab issuer, which needs no token file at
+// all.
 func GlabConfig() config.GitLabConfig {
-	c := Config().GitLab
-	c.Issuer, c.IssuerTokenFile = "glab", ""
+	c := GitLab()
+	c.Issuer = config.Issuer{Type: "glab"}
 	return c
 }
 
@@ -113,9 +126,10 @@ case "$method $last" in
 		fi
 		printf '{"data":{"currentUser":{"personalAccessTokens":{"nodes":[{"id":"gid://gitlab/PersonalAccessToken/99","name":"%s-other"},{"id":"gid://gitlab/PersonalAccessToken/42","name":"%s"}]}}}}\n' "$name" "$name"
 		;;
-	*"projects(ids:"*)
-		echo '{"data":{"currentUser":{"username":"alice"},"l0":{"nodes":[{"id":"gid://gitlab/Project/42","fullPath":"group/project"}]}}}'
+	*'p0: project(fullPath: "group/project")'*)
+		echo '{"data":{"currentUser":{"username":"alice"},"p0":{"id":"gid://gitlab/Project/42","fullPath":"group/project"}}}'
 		;;
+
 	*)
 		echo "unexpected query" >&2
 		exit 1

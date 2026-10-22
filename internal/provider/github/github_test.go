@@ -26,7 +26,7 @@ func mockAPI(t *testing.T, handler func(*http.Request) (int, any)) *api.API {
 
 func TestGitHubConcurrentRotation(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	c := testutil.Config().GitHub
+	c := testutil.GitHub()
 	c.StateFile = filepath.Join(t.TempDir(), "github.json")
 	var calls atomic.Int32
 	api := mockAPI(t, func(r *http.Request) (int, any) {
@@ -69,7 +69,7 @@ func TestGitHubConcurrentRotation(t *testing.T) {
 
 func TestGitHubIdentityMismatch(t *testing.T) {
 	api := mockAPI(t, func(r *http.Request) (int, any) { return 200, map[string]string{"login": "someone-else"} })
-	g := &Provider{Config: testutil.Config().GitHub, API: api, Now: time.Now}
+	g := &Provider{Config: testutil.GitHub(), API: api, Now: time.Now}
 	if g.Verify(context.Background(), "ghu_test") == nil {
 		t.Fatal("accepted wrong user")
 	}

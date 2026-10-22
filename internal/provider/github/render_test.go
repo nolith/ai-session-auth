@@ -34,7 +34,7 @@ func TestRenderer(t *testing.T) {
 }
 
 func TestSetup(t *testing.T) {
-	c := testutil.Config().GitHub
+	c := testutil.GitHub()
 	c.Owners = []string{"nolith"}
 	s := New(c, nil).Setup()
 	if len(s.Env) != 2 || s.Env["GH_CONFIG_DIR"] != "$GEAS_SESSION_DIR/gh" || s.Env["GH_PROMPT_DISABLED"] != "1" {
@@ -73,7 +73,7 @@ func TestProtect(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GH_CONFIG_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	c := testutil.Config().GitHub
+	c := testutil.GitHub()
 	c.StateFile = "/state/geas/github.json"
 	got := New(c, nil).Setup().Protect
 	if len(got) != 3 || got[0] != "/state/geas/github.json" || got[1] != "/state/geas/github.json.lock" || got[2] != filepath.Join(home, ".config", "gh") {
