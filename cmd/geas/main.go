@@ -35,6 +35,8 @@ Commands:
                                 Store the issuer PAT of a GitLab host whose issuer
                                 is "bearer", with mode 600
   config check                  Check the configuration and list its providers
+  allowed URL                   Exit 0 when a session hands its credentials to Git
+                                for the remote URL (HTTPS, or SSH as git@), 1 if not
   run -- HARNESS [ARGS...]       Start a session with user credentials; inside a
                                 session, run HARNESS in it
   credential get                Git's credential helper, inside a session
@@ -115,6 +117,11 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 		return 0, github.New(settings.GitHub[0], api).Login(ctx, os.Stdout)
 	case "save-gitlab-issuer":
 		return saveGitLabIssuer(ctx, settings, rest[1:])
+	case "allowed":
+		if len(rest) != 2 {
+			return 2, errors.New("usage: geas allowed URL")
+		}
+		return allowed(os.Stdout, settings, rest[1])
 	case "config":
 		if len(rest) != 2 || rest[1] != "check" {
 			return 2, errors.New("usage: geas config check")
@@ -166,6 +173,28 @@ func saveGitLabIssuer(ctx context.Context, settings config.Config, args []string
 	}
 	fmt.Fprintln(os.Stdout, "Issuer for "+bearer[0].Host+" saved with mode 600.")
 	return 0, nil
+}
+
+// allowed is geas allowed: it prints the provider whose credential a
+// session's Git would get for the remote URL and exits 0, or exits 1 when
+// none would. It reads only the configuration, with no network, and works
+// outside a session as inside one.
+func allowed(output io.Writer, settings config.Config, remote string) (int, error) {
+	host, path, err := sessiondir.Remote(remote)
+	if err != nil {
+		return 1, err
+	}
+	hosts, err := session.GitHosts(settings)
+	if err != nil {
+		return 1, err
+	}
+	for _, h := range hosts {
+		if h.Host == host && h.Allows(path) {
+			fmt.Fprintln(output, h.Provider)
+			return 0, nil
+		}
+	}
+	return 1, nil
 }
 
 // configCheck reports a configuration that loaded, with its providers. An

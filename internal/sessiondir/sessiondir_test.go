@@ -167,3 +167,34 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("session directory left: %v", err)
 	}
 }
+
+// Remote reads the forms a session's Git asks the helper about, and
+// refuses those it never would.
+func TestRemote(t *testing.T) {
+	for _, tc := range []struct {
+		url, host, path string
+	}{
+		{"https://gitlab.com/group/project.git", "gitlab.com", "group/project.git"},
+		{"https://oauth2@gitlab.example.com/group/sub/project", "gitlab.example.com", "group/sub/project"},
+		{"https://gitlab.com:8443/group/project", "gitlab.com:8443", "group/project"},
+		{"git@gitlab.com:group/project.git", "gitlab.com", "group/project.git"},
+		{"ssh://git@github.com/nolith/geas.git", "github.com", "nolith/geas.git"},
+		{"https://gitlab.com/group/%2e%2e/evil", "gitlab.com", "group/%2e%2e/evil"},
+	} {
+		host, path, err := Remote(tc.url)
+		if err != nil || host != tc.host || path != tc.path {
+			t.Errorf("%s: %q %q %v", tc.url, host, path, err)
+		}
+	}
+	for _, url := range []string{
+		"", "gitlab.com/group/project", "http://gitlab.com/group/project", "ftp://gitlab.com/x",
+		"ssh://alice@gitlab.com/group/project", "ssh://gitlab.com/group/project", "ssh://git@gitlab.com:2222/group/project",
+		"alice@gitlab.com:group/project", "git@gitlab.com", "git@:group/project", "git@GitLab.com:group/project",
+		"https://gitlab.com/", "https://gitlab.com", "https://gitlab.com/group/project?x=1", "https://gitlab.com/group/project#x",
+		"https://gitlab.com/group project", "file:///tmp/repo", "/tmp/repo",
+	} {
+		if host, path, err := Remote(url); err == nil {
+			t.Errorf("%q: %q %q", url, host, path)
+		}
+	}
+}

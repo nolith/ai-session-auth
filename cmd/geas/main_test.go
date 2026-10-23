@@ -145,3 +145,65 @@ func TestConfigCheck(t *testing.T) {
 		t.Fatalf("run with version 1: %d %v", code, err)
 	}
 }
+
+// captureStdout returns what f writes to os.Stdout.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	stdout := os.Stdout
+	captured, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = captured
+	defer func() { os.Stdout = stdout }()
+	f()
+	raw, _ := os.ReadFile(captured.Name())
+	return string(raw)
+}
+
+// geas allowed answers from the configuration alone, outside any session:
+// exit 0 and the provider's ID when a session's Git would get a credential
+// for the remote, 1 otherwise. No issuer is prepared: the bearer issuer's
+// token file does not exist.
+func TestAllowed(t *testing.T) {
+	t.Setenv("GEAS_SESSION_DIR", "")
+	second := testutil.GlabConfig()
+	second.Host, second.Namespaces = "gitlab.example.com", []string{"ops"}
+	c := testutil.Config()
+	c.GitLab = []config.GitLabConfig{testutil.NamespacedConfig(), second}
+	c.GitHub[0].Owners = []string{"nolith"}
+	raw, _ := json.Marshal(c)
+	path := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(path, raw, 0600)
+	for _, tc := range []struct {
+		url     string
+		code    int
+		want    string
+		invalid bool // not a remote a session's Git asks the helper about
+	}{
+		{"https://gitlab.com/group/project.git", 0, "gitlab:gitlab.com\n", false},
+		{"git@gitlab.com:other/sub/deeper/project.git", 0, "gitlab:gitlab.com\n", false},
+		{"ssh://git@gitlab.com/alice/dotfiles.git", 0, "gitlab:gitlab.com\n", false},
+		{"https://gitlab.com/elsewhere/project", 0, "gitlab:gitlab.com\n", false},
+		{"git@gitlab.example.com:ops/runbooks.git", 0, "gitlab:gitlab.example.com\n", false},
+		{"https://github.com/Nolith/geas", 0, "github:github.com\n", false},
+		{"git@github.com:alice/repo.git", 0, "github:github.com\n", false},
+		{"https://gitlab.com/other/project", 1, "", false},
+		{"https://gitlab.com/elsewhere/other", 1, "", false},
+		{"git@gitlab.example.com:group/project.git", 1, "", false},
+		{"https://gitlab.com/group/../evil/project", 1, "", false},
+		{"https://ops.gitlab.net/group/project", 1, "", false},
+		{"http://gitlab.com/group/project", 1, "", true},
+		{"ssh://git@gitlab.com:2222/group/project", 1, "", true},
+	} {
+		var code int
+		var err error
+		out := captureStdout(t, func() { code, err = execute(context.Background(), []string{"--config", path, "allowed", tc.url}, nil) })
+		if code != tc.code || out != tc.want || (err != nil) != tc.invalid {
+			t.Errorf("%s: exit %d, %q, %v", tc.url, code, out, err)
+		}
+	}
+	if code, err := execute(context.Background(), []string{"--config", path, "allowed"}, nil); code != 2 || err == nil {
+		t.Fatalf("no URL: %d %v", code, err)
+	}
+}

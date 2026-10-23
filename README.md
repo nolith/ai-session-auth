@@ -71,7 +71,10 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
   the launcher is killed outright.
 - A sandbox policy per session, from the paths each provider protects, as a
   neutral file and a nono profile fragment, and `geas sandbox check` to
-  verify it from inside the sandbox.
+  verify it from inside the sandbox, run in the background through the
+  configured `wrapper` in every session.
+- `geas allowed URL`, which tells from the configuration alone whether a
+  session's Git gets a credential for a remote.
 - Atomic GitHub state updates, private secret files, and locking across sessions.
 - No tokens in normal launcher output, command-line arguments, or Git URLs.
 
@@ -283,6 +286,25 @@ $ geas config check
   gitlab:gitlab.com  issuer glab, as alice
   github:github.com  as alice
 ```
+
+`geas allowed URL` tells whether a session's Git would get a credential for a
+remote, from the configuration alone, with no network and outside a session
+too, as a check before cloning or a preflight in a launcher would:
+
+```console
+$ geas allowed git@gitlab.com:gitlab-org/gitlab.git
+gitlab:gitlab.com
+$ geas allowed https://gitlab.com/someone-else/project; echo $?
+1
+```
+
+It exits 0 and prints the provider's ID when the remote's host has a
+provider whose allowlist covers the path, and 1 when not. It takes the
+forms a session hands to the credential helper: `https://HOST/PATH`, and
+`git@HOST:PATH` and `ssh://git@HOST/PATH`, which the session rewrites to
+HTTPS; any other form exits 1 with an error. The allowlist is the
+configured one: for GitLab, a path inside a namespace or a namespace's own
+path, before the session's lookup has said which namespaces are projects.
 
 ### The wrapper
 
@@ -699,7 +721,10 @@ output gone, the ledger, the reaper after SIGKILL (also during the mint,
 finding the PAT by name) and its silence after a clean exit, nested sessions,
 cancellable issuer input, the harness starting before any provider step,
 a harness exiting during the mint, Git waiting in the helper for a slow
-issuer and failing fast with a failing one, one glab lock across hosts, and failing
+issuer and failing fast with a failing one, one glab lock across hosts, two
+GitLab instances in one session, configuration version 2 and the refusal of
+version 1, the wrapper with its early-exit hint and the background sandbox
+check, no_new_privs, `geas allowed`, and failing
 providers that never stop the start while Git refuses.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:

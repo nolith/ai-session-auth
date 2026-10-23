@@ -254,6 +254,21 @@ func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers 
 	return providers, failed
 }
 
+// GitHosts are the hosts and allowlists the configured providers give Git,
+// with the provider that answers for each, from the configuration alone:
+// no issuer is prepared and nothing goes over the network, so that it
+// works outside a session.
+func GitHosts(settings config.Config) ([]credhelper.Host, error) {
+	var providers []provider.Provider
+	for _, c := range settings.GitLab {
+		providers = append(providers, &gitlab.Provider{Config: c})
+	}
+	for _, c := range settings.GitHub {
+		providers = append(providers, github.New(c, nil))
+	}
+	return credhelper.Hosts(providers)
+}
+
 // ExitNotStarted is geas run's exit code when it fails before the harness
 // starts: a configuration error, a session directory or a reaper it cannot
 // create, a harness it cannot start. The error is printed; a launcher

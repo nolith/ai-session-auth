@@ -38,6 +38,10 @@ func (h Host) gitHost() provider.GitHost {
 	return provider.GitHost{Host: h.Host, Username: h.Username, Namespaces: h.Namespaces, Repositories: h.Repositories, FoldCase: h.FoldCase}
 }
 
+// Allows reports whether the helper hands this host's credential out for a
+// repository path, as Git sends it.
+func (h Host) Allows(path string) bool { return h.gitHost().Allows(path) }
+
 // Hosts collects every provider's Git hosts, and refuses a host two
 // providers claim.
 func Hosts(providers []provider.Provider) ([]Host, error) {
@@ -106,7 +110,7 @@ func Get(dir *sessiondir.Dir, input io.Reader, output io.Writer) error {
 			host = &hosts[i]
 		}
 	}
-	if host == nil || !host.gitHost().Allows(request["path"]) {
+	if host == nil || !host.Allows(request["path"]) {
 		return nil
 	}
 	marker, err := waitMarker(dir, host.Provider)
