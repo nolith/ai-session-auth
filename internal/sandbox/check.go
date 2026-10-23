@@ -21,9 +21,14 @@ import (
 func Check(dir *sessiondir.Dir, output io.Writer) (bool, error) {
 	policy, err := Load(dir)
 	if err != nil {
-		// The policy is in the session directory: unreadable, it fails the
-		// check like an unreadable directory.
-		fmt.Fprintln(output, "sandbox check: the session directory is not readable")
+		// The policy is in the session directory: either fails the check,
+		// and the summary says which, since a policy the session wrote
+		// wrongly is a different bug from a sandbox that hides the session.
+		if readable(dir.Path()) {
+			fmt.Fprintln(output, "sandbox check: cannot load the sandbox policy, "+PolicyFile+": "+loadError(err))
+		} else {
+			fmt.Fprintln(output, "sandbox check: the session directory is not readable")
+		}
 		return false, nil
 	}
 	if len(policy.Deny) == 0 {
@@ -47,6 +52,16 @@ func Check(dir *sessiondir.Dir, output io.Writer) (bool, error) {
 	}
 	fmt.Fprintf(output, "sandbox check: %d of %d protected paths readable (%d absent); %s\n", readableCount, len(policy.Deny), absent, verdict)
 	return readableCount == 0 && session, nil
+}
+
+// loadError is why the policy did not load, without its path, which the
+// summary names already.
+func loadError(err error) string {
+	var path *os.PathError
+	if errors.As(err, &path) {
+		return path.Err.Error()
+	}
+	return err.Error()
 }
 
 // readable reports whether path's contents can be read: a file's first byte,

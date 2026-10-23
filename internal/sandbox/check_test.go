@@ -41,6 +41,21 @@ func TestCheck(t *testing.T) {
 	if ok, err = Check(dir, &out); err != nil || !ok || out.String() != "sandbox check: 0 of 3 protected paths readable (1 absent); the session directory is readable\n" {
 		t.Fatalf("%v %v:\n%s", ok, err, out.String())
 	}
+	// A policy that does not load fails it, with the reason: here, one
+	// readable by others, which the session never writes.
+	path, _ := dir.Join(PolicyFile)
+	if err = os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if ok, err = Check(dir, &out); err != nil || ok || out.String() != "sandbox check: cannot load the sandbox policy, sandbox/policy.json: secret file must be owned by you, regular and chmod 600\n" {
+		t.Fatalf("%v %v:\n%s", ok, err, out.String())
+	}
+	os.Remove(path)
+	out.Reset()
+	if ok, err = Check(dir, &out); err != nil || ok || out.String() != "sandbox check: cannot load the sandbox policy, sandbox/policy.json: no such file or directory\n" {
+		t.Fatalf("%v %v:\n%s", ok, err, out.String())
+	}
 	// An unreadable session directory fails it.
 	if err = os.Chmod(dir.Path(), 0000); err != nil {
 		t.Fatal(err)
