@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -819,5 +820,43 @@ func TestBackgroundSandboxCheck(t *testing.T) {
 	s.wait(t)
 	if output := string(raw); !strings.HasPrefix(output, "gitlab:gitlab.com  ready\nsandbox            ready\nstatus exit 0\n") {
 		t.Fatalf("passing sandbox:\n%s", output)
+	}
+}
+
+// no_new_privs: a configuration error outside Linux, exit code 125; on
+// Linux, geas built without cgo, as the flake builds it, runs the harness
+// with the flag set, as /proc says.
+func TestNoNewPrivs(t *testing.T) {
+	dir := t.TempDir()
+	c := testutil.Config()
+	c.SessionHours, c.NoNewPrivs, c.GitLab = 1, true, nil
+	c.GitHub[0].StateFile = filepath.Join(dir, "github.json")
+	raw, _ := json.Marshal(c)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "linux" {
+		output, code := runGeas(t, []string{"--config", path, "run", "--", "true"})
+		if code != 125 || output != "geas: no_new_privs is supported on Linux only, not on "+runtime.GOOS+": leave it out\n" {
+			t.Fatalf("exit %d: %q", code, output)
+		}
+		return
+	}
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go to build geas without cgo")
+	}
+	binary := filepath.Join(dir, "geas")
+	build := exec.Command(goTool, "build", "-o", binary, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	launcher := exec.Command(binary, "--config", path, "run", "--", "/bin/sh", "-c", "grep NoNewPrivs /proc/self/status")
+	launcher.Env = append(os.Environ(), "XDG_STATE_HOME="+t.TempDir())
+	output, err := launcher.CombinedOutput()
+	if err != nil || string(output) != "NoNewPrivs:\t1\n" {
+		t.Fatalf("%v: %q", err, output)
 	}
 }

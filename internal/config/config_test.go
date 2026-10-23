@@ -294,6 +294,26 @@ func TestWrapperConfig(t *testing.T) {
 	}
 }
 
+// no_new_privs is a Linux flag: refused anywhere else, as a configuration
+// error.
+func TestNoNewPrivsConfig(t *testing.T) {
+	t.Cleanup(func(previous string) func() { return func() { goos = previous } }(goos))
+	c := testConfig()
+	c.NoNewPrivs = true
+	goos = "linux"
+	if loaded, err := load(t, c); err != nil || !loaded.NoNewPrivs {
+		t.Fatalf("Linux: %+v %v", loaded, err)
+	}
+	goos = "darwin"
+	if _, err := load(t, c); err == nil || err.Error() != "no_new_privs is supported on Linux only, not on darwin: leave it out" {
+		t.Fatalf("macOS: %v", err)
+	}
+	c.NoNewPrivs = false
+	if _, err := load(t, c); err != nil {
+		t.Fatalf("macOS without it: %v", err)
+	}
+}
+
 // The default path follows XDG_CONFIG_HOME, else ~/.config, on macOS too.
 func TestDefaultPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")

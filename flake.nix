@@ -43,6 +43,10 @@
           };
           vendorHash = null;
 
+          # no_new_privs needs syscall.AllThreadsSyscall, which refuses in a
+          # binary built with cgo; on Linux, net would link cgo.
+          env.CGO_ENABLED = 0;
+
           ldflags = [
             "-s"
             "-w"
@@ -54,9 +58,14 @@
             pkgs.ps
           ];
           checkFlags = [ "-race" ];
+          # The race detector needs cgo on Linux; the installed binary,
+          # built before the tests, keeps CGO_ENABLED=0.
           preCheck = ''
             export HOME="$TMPDIR"
             go vet ./...
+          ''
+          + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export CGO_ENABLED=1
           '';
 
           meta = {

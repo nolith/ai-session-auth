@@ -275,10 +275,17 @@ var launchReaper = startReaper
 // args, and a harness that exits non-zero soon after its start gets the
 // wrapper's hint printed, last, once it has exited. The wrapper also runs
 // geas sandbox check in the background, whose verdict goes to the sandbox
-// marker.
+// marker. With no_new_privs, Run first sets it on geas itself, on Linux.
 func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return ExitNotStarted, errors.New("specify a harness command after run --")
+	}
+	// Before anything runs: the reaper, glab, the wrapper and the harness
+	// all inherit it, and a session never starts without it.
+	if settings.NoNewPrivs {
+		if err := setNoNewPrivs(); err != nil {
+			return ExitNotStarted, err
+		}
 	}
 	binary, err := executablePath()
 	if err != nil {

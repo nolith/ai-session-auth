@@ -18,10 +18,11 @@ your `PATH` when present, and the glab issuer needs `glab`.
 ```bash
 git clone https://github.com/nolith/geas.git
 cd geas
-go build -o geas ./cmd/geas
+CGO_ENABLED=0 go build -o geas ./cmd/geas
 ```
 
-The compiled binary does not require a Go runtime.
+The compiled binary does not require a Go runtime. `CGO_ENABLED=0` keeps it
+free of cgo, which `no_new_privs` needs on Linux.
 
 With Nix, build or run it from the flake, or enter a shell with Go, `gh`,
 `glab`, and the formatter:
@@ -261,6 +262,7 @@ command, names another. It is version 2, a list of providers:
 | `version`       | `2`, required                                                                                              |
 | `session_hours` | the session's length, 24 by default, at most 48                                                            |
 | `wrapper`       | optional: `command`, the program and arguments the harness starts through, and `early_exit_hint`           |
+| `no_new_privs`  | Linux only: `true` sets no_new_privs on geas before anything runs; refused on macOS                        |
 | `providers`     | one entry per credential source, by `type`: `gitlab` (one per instance) or `github`; one provider per host |
 
 A `gitlab` provider has `host` (such as `gitlab.com`, a host name in lower
@@ -304,6 +306,16 @@ prints: a wrapper that refuses to start the harness looks like that. It is
 never printed while the harness runs, after a clean exit, or when geas
 itself stopped the harness. A wrapper that cannot be started is geas's
 failure, exit code 125.
+
+### no_new_privs
+
+On Linux, `"no_new_privs": true` sets the no_new_privs flag on geas itself,
+on every thread, before anything runs, as `setpriv --no-new-privs` would:
+the reaper, glab, the wrapper and the harness inherit it, and nothing they
+run can gain privileges through a setuid or file-capability program, `sudo`
+included. geas refuses to start without it (exit code 125) when the flag
+cannot be set, as in a geas built with cgo: build with `CGO_ENABLED=0`, as
+the flake does. On macOS the field is a configuration error.
 
 ### Migrating from version 1
 

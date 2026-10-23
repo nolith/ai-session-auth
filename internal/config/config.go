@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 
 	"strings"
@@ -25,6 +26,9 @@ import (
 
 // Version is the configuration format this geas reads.
 const Version = 2
+
+// goos is the system the configuration is checked for; the tests change it.
+var goos = runtime.GOOS
 
 type Scope struct {
 	Access      string   `json:"access"`
@@ -77,6 +81,8 @@ type Wrapper struct {
 // the file's order.
 type Config struct {
 	SessionHours float64
+	// NoNewPrivs sets Linux's no_new_privs on geas before anything runs.
+	NoNewPrivs bool
 	// Wrapper is nil without one: the harness starts directly.
 	Wrapper *Wrapper
 	GitLab  []GitLabConfig
@@ -88,6 +94,7 @@ type Config struct {
 type file struct {
 	Version      int               `json:"version"`
 	SessionHours float64           `json:"session_hours,omitempty"`
+	NoNewPrivs   bool              `json:"no_new_privs,omitempty"`
 	Wrapper      *Wrapper          `json:"wrapper,omitempty"`
 	Providers    []json.RawMessage `json:"providers"`
 }
@@ -113,7 +120,7 @@ type githubEntry struct {
 
 // MarshalJSON writes the configuration as version 2.
 func (c Config) MarshalJSON() ([]byte, error) {
-	f := file{Version: Version, SessionHours: c.SessionHours, Wrapper: c.Wrapper}
+	f := file{Version: Version, SessionHours: c.SessionHours, NoNewPrivs: c.NoNewPrivs, Wrapper: c.Wrapper}
 	for _, g := range c.GitLab {
 		raw, err := json.Marshal(gitlabEntry{TypeGitLab, g})
 		if err != nil {
@@ -223,7 +230,7 @@ func parse(raw []byte) (Config, error) {
 	if config.SessionHours == 0 {
 		config.SessionHours = 24
 	}
-	config.Wrapper = f.Wrapper
+	config.Wrapper, config.NoNewPrivs = f.Wrapper, f.NoNewPrivs
 	for i, entry := range f.Providers {
 		where := fmt.Sprintf("providers[%d]", i)
 		var kind struct {
@@ -384,6 +391,9 @@ func (c Config) validate() error {
 	}
 	if err := validateWrapper(c.Wrapper); err != nil {
 		return err
+	}
+	if c.NoNewPrivs && goos != "linux" {
+		return fmt.Errorf("no_new_privs is supported on Linux only, not on %s: leave it out", goos)
 	}
 	// A host has one provider: Git asks the credential helper by host.
 	hosts := map[string]bool{}
