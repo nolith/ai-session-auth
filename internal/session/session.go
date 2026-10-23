@@ -273,7 +273,9 @@ var launchReaper = startReaper
 // or ran out of time. What the session minted is revoked on the way out.
 // With a wrapper, the harness starts as the wrapper's command followed by
 // args, and a harness that exits non-zero soon after its start gets the
-// wrapper's hint printed, last, once it has exited.
+// wrapper's hint printed, last, once it has exited. The wrapper also runs
+// geas sandbox check in the background, whose verdict goes to the sandbox
+// marker.
 func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return ExitNotStarted, errors.New("specify a harness command after run --")
@@ -333,6 +335,12 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 			return ExitNotStarted, err
 		}
 	}
+	if settings.Wrapper != nil {
+		if err = mark(dir, SandboxMarker, sessiondir.Pending, ""); err != nil {
+			dir.Remove()
+			return ExitNotStarted, err
+		}
+	}
 	timer.Step("plan")
 	// Last, after the revocation's lines: why the harness may have exited
 	// at once.
@@ -371,7 +379,16 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	acquiring, stop := context.WithCancel(ctx)
 	var acquirers sync.WaitGroup
 	defer func() { stop(); acquirers.Wait(); timer.Flush() }()
+	// The wrapper's sandbox, checked from the inside as the harness sees it.
+	if settings.Wrapper != nil {
+		acquirers.Add(1)
+		go func() {
+			defer acquirers.Done()
+			checkSandbox(acquiring, dir, settings.Wrapper.Command, binary, environment)
+		}()
+	}
 	store := newCredentials(dir)
+
 	for _, p := range providers {
 		if failed[p.ID()] != "" {
 			continue

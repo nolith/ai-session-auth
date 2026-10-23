@@ -435,7 +435,11 @@ provider:
 $ geas status
 github:github.com  failed: run github-login before starting a session
 gitlab:gitlab.com  ready
+sandbox            failed: readable: /home/alice/.config/glab-cli
 ```
+
+With a `wrapper`, the `sandbox` line is the background sandbox check's
+verdict (see "Limits and isolation").
 
 It exits 0 when every provider is ready, 1 when one failed, and 75
 (`EX_TEMPFAIL`, try again later) while one is still pending and none failed.
@@ -559,17 +563,18 @@ session before it starts.
 The session directory, owner-only (mode 700, every file mode 600, each
 replaced atomically):
 
-| File                            | Written by                                                        | Read by                             |
-| :------------------------------ | :---------------------------------------------------------------- | :---------------------------------- |
-| `ledger`                        | the launcher, before each mint; the reaper                        | the launcher and the reaper         |
-| `gitconfig`                     | the launcher, at start                                            | Git, through `include.path`         |
-| `git/hosts.json`                | the launcher, at start: hosts and allowlists                      | `geas credential`                   |
-| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed           | `geas credential`                   |
-| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason | `geas credential`, `geas status`    |
-| `glab/config.yml`               | the GitLab renderer, one entry per host                           | `glab`                              |
-| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                               | `gh`                                |
-| `sandbox/policy.json`           | the launcher, at start                                            | `geas sandbox check`                |
-| `sandbox/nono.json`             | the launcher, at start                                            | the sandbox, `GEAS_SANDBOX_PROFILE` |
+| File                            | Written by                                                           | Read by                             |
+| :------------------------------ | :------------------------------------------------------------------- | :---------------------------------- |
+| `ledger`                        | the launcher, before each mint; the reaper                           | the launcher and the reaper         |
+| `gitconfig`                     | the launcher, at start                                               | Git, through `include.path`         |
+| `git/hosts.json`                | the launcher, at start: hosts and allowlists                         | `geas credential`                   |
+| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed              | `geas credential`                   |
+| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason    | `geas credential`, `geas status`    |
+| `markers/sandbox`               | the launcher, with a wrapper: the background sandbox check's verdict | `geas status`                       |
+| `glab/config.yml`               | the GitLab renderer, one entry per host                              | `glab`                              |
+| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                                  | `gh`                                |
+| `sandbox/policy.json`           | the launcher, at start                                               | `geas sandbox check`                |
+| `sandbox/nono.json`             | the launcher, at start                                               | the sandbox, `GEAS_SANDBOX_PROFILE` |
 
 `<provider>` is a provider's ID, such as `gitlab:gitlab.com`. `glab` and `gh`
 may write their own files into their directories; a renderer replaces its
@@ -605,6 +610,15 @@ policy denies and the session directory, names each denied path it could
 read, and exits 1 if any was readable or the session directory was not.
 Run outside a sandbox, it fails by design: your own logins are readable
 there.
+
+With a `wrapper`, each session runs the check itself, in the background
+once the harness has started, as `wrapper.command... geas sandbox check`,
+with the session's environment, in a session of its own without a
+terminal, and its output kept. Its verdict is the `sandbox` entry of
+`geas status`, `pending` until it ends, then `ready`, or `failed` with the
+paths it could read (or why it could not run), which also makes
+`geas status` exit 1. Without a wrapper there is nothing to check, and no
+entry. Nothing it or the wrapper prints reaches the terminal.
 
 The credential helper's allowlist controls where the helper returns tokens;
 it does not restrict API calls. The tokens themselves are the boundary:

@@ -363,3 +363,33 @@ func TestEarlyExitHint(t *testing.T) {
 		}
 	}
 }
+
+// The check's verdict: the paths it could read, else its summary, else
+// whatever the wrapper said last, else how it ended.
+func TestSandboxVerdict(t *testing.T) {
+	failed := exec.Command("/bin/sh", "-c", "exit 3").Run()
+	for _, tc := range []struct {
+		name     string
+		err      error
+		output   string
+		timedOut bool
+		state    string
+		reason   string
+	}{
+		{"passed", nil, "sandbox check: 0 of 4 protected paths readable (1 absent); the session directory is readable\n", false, sessiondir.Ready, ""},
+		{"readable paths", failed, "readable: /home/alice/.config/glab-cli\nreadable: /state/geas\nsandbox check: 2 of 4 protected paths readable (0 absent); the session directory is readable\n", false, sessiondir.Failed, "readable: /home/alice/.config/glab-cli, /state/geas"},
+		{"session unreadable", failed, "sandbox check: 0 of 4 protected paths readable (0 absent); the session directory is NOT readable\n", false, sessiondir.Failed, "0 of 4 protected paths readable (0 absent); the session directory is NOT readable"},
+		{"wrapper refused", failed, "agent-sandbox: profile agent-sandbox not found\n\n", false, sessiondir.Failed, "the wrapper or the check failed: agent-sandbox: profile agent-sandbox not found"},
+		{"silent", failed, "", false, sessiondir.Failed, "the sandbox check failed: exit status 3"},
+		{"timed out", failed, "", true, sessiondir.Failed, "the sandbox check did not finish within 1m0s"},
+		{"escapes", failed, "readable: /x\x1b[2J\n", false, sessiondir.Failed, "readable: /x [2J"},
+	} {
+		state, reason := sandboxVerdict(tc.err, []byte(tc.output), tc.timedOut)
+		if state != tc.state || reason != tc.reason {
+			t.Errorf("%s: %s %q", tc.name, state, reason)
+		}
+	}
+	if got := checkReason(strings.Repeat("x", 2000)); len(got) != 1003 {
+		t.Errorf("not shortened: %d", len(got))
+	}
+}

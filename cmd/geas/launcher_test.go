@@ -36,9 +36,10 @@ func TestMain(m *testing.M) {
 		os.Args = append([]string{"geas"}, args...)
 		main()
 	}
-	// The launcher's own re-executions: the reaper, and Git's credential
-	// helper; and geas status, which a harness runs as $GEAS_TEST_BINARY.
-	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential" || os.Args[1] == "status") {
+	// The launcher's own re-executions: the reaper, Git's credential helper
+	// and the background sandbox check; and geas status, which a harness
+	// runs as $GEAS_TEST_BINARY.
+	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential" || os.Args[1] == "status" || os.Args[1] == "sandbox") {
 		main()
 	}
 	os.Exit(m.Run())
@@ -740,15 +741,23 @@ func TestWrapperAndEarlyExitHint(t *testing.T) {
 	if output := string(raw); !strings.HasPrefix(output, "harness ran\n") || !strings.HasSuffix(output, "GitLab session PAT revoked.\nskip the sandbox with SANDBOX=off\n") {
 		t.Fatalf("output:\n%s", output)
 	}
+	// The harness's line; the background sandbox check runs through the
+	// wrapper too.
 	logged, err := os.ReadFile(log)
-	lines := strings.Split(strings.TrimSuffix(string(logged), "\n"), "\n")
-	if err != nil || len(lines) != 1 {
+	var harness []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(logged), "\n"), "\n") {
+		if !strings.HasSuffix(strings.Split(line, "|")[0], " sandbox check") {
+			harness = append(harness, line)
+		}
+	}
+	if err != nil || len(harness) != 1 {
 		t.Fatalf("wrapper log: %q %v", logged, err)
 	}
-	fields := strings.Split(lines[0], "|")
+	fields := strings.Split(harness[0], "|")
 	if len(fields) != 3 || !strings.HasPrefix(fields[0], "wrapper --profile agent /bin/sh -c ") || !strings.Contains(fields[1], "/geas/sessions/") || fields[2] != fields[1]+"/sandbox/nono.json" {
-		t.Fatalf("the wrapper saw %q", lines[0])
+		t.Fatalf("the wrapper saw %q", harness[0])
 	}
+
 	// A clean exit: no hint.
 	s = launchConfig(t, c, untilSettled+"exit 0")
 	raw, _ = io.ReadAll(s.output)
@@ -764,5 +773,51 @@ func TestWrapperAndEarlyExitHint(t *testing.T) {
 	output, code := runGeas(t, []string{"--config", path, "run", "--", "true"}, "PATH="+testutil.FakeGlab(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if code != 125 || output != "geas: cannot start the wrapper; check wrapper.command\n" {
 		t.Fatalf("no wrapper: exit %d: %q", code, output)
+	}
+}
+
+// untilSandboxChecked is a harness script line that waits for the
+// background sandbox check's verdict, and for GitLab's marker.
+const untilSandboxChecked = `until grep -qs '"state":"ready"' "$GEAS_SESSION_DIR/markers/gitlab:gitlab.com" && ! grep -qs pending "$GEAS_SESSION_DIR/markers/sandbox"; do sleep 0.02; done; `
+
+// With a wrapper, geas runs geas sandbox check through it in the
+// background, and geas status shows the verdict: here no sandbox at all,
+// so geas's state is readable and the check fails, naming it. Nothing the
+// check or the wrapper prints reaches the terminal.
+func TestBackgroundSandboxCheck(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "wrapper.log")
+	wrapper := fakeWrapper(t, log)
+	noisy := filepath.Join(t.TempDir(), "noisy-wrapper")
+	script := "#!/bin/sh\necho wrapper noise; echo wrapper noise >&2\nexec " + shellQuote(wrapper) + " \"$@\"\n"
+	if err := os.WriteFile(noisy, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}, Wrapper: &config.Wrapper{Command: []string{noisy}}}
+	// No glab login to find: geas's own state is the one readable path.
+	s := launchConfig(t, c, untilSandboxChecked+`"$GEAS_TEST_BINARY" status; echo "status exit $?"`, "GLAB_CONFIG_DIR=/nonexistent/glab-cli")
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	output := string(raw)
+	want := "wrapper noise\nwrapper noise\ngitlab:gitlab.com  ready\nsandbox            failed: readable: " + filepath.Join(s.state, "geas") + "\nstatus exit 1\n"
+	if !strings.HasPrefix(output, want) || strings.Count(output, "wrapper noise") != 2 {
+		t.Fatalf("output:\n%s\nwant it to start with:\n%s", output, want)
+	}
+	// The harness and the check, both through the wrapper, in the session.
+	logged, err := os.ReadFile(log)
+	if err != nil || strings.Count(string(logged), "\n") != 2 || !strings.Contains(string(logged), "/"+filepath.Base(os.Args[0])+" sandbox check|") {
+		t.Fatalf("wrapper log: %q %v", logged, err)
+	}
+	// A wrapper whose sandbox passes the check: ready.
+	passing := filepath.Join(t.TempDir(), "passing-wrapper")
+	script = "#!/bin/sh\ncase \"$*\" in *' sandbox check') echo 'sandbox check: 0 of 2 protected paths readable (1 absent); the session directory is readable'; exit 0 ;; esac\nexec \"$@\"\n"
+	if err := os.WriteFile(passing, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	c.Wrapper.Command = []string{passing}
+	s = launchConfig(t, c, untilSandboxChecked+`"$GEAS_TEST_BINARY" status; echo "status exit $?"`)
+	raw, _ = io.ReadAll(s.output)
+	s.wait(t)
+	if output := string(raw); !strings.HasPrefix(output, "gitlab:gitlab.com  ready\nsandbox            ready\nstatus exit 0\n") {
+		t.Fatalf("passing sandbox:\n%s", output)
 	}
 }

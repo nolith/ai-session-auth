@@ -15,10 +15,9 @@ import (
 // when one was readable or the session directory was not. Outside any
 // sandbox, it fails: the user's own logins are readable there.
 //
-// Phases to come run it in the background after the harness starts, through
-// the configured wrapper, and record the result in a marker for geas status:
-// nothing may print to the terminal then, so that caller passes io.Discard
-// and keeps only the verdict.
+// A session with a wrapper runs it in the background after the harness
+// starts, through the wrapper, and records the verdict in a marker for geas
+// status, from this output, which never reaches the terminal.
 func Check(dir *sessiondir.Dir, output io.Writer) (bool, error) {
 	policy, err := Load(dir)
 	if err != nil {
