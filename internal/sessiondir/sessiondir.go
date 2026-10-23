@@ -157,6 +157,18 @@ func (d *Dir) ReadFile(rel string) ([]byte, error) {
 	return secretfile.Read(path)
 }
 
+// RemoveFile deletes rel, if it is there.
+func (d *Dir) RemoveFile(rel string) error {
+	path, err := d.Join(rel)
+	if err != nil {
+		return err
+	}
+	if err = os.Remove(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // Remove deletes the directory and everything in it, once nothing in the
 // ledger is left to revoke.
 func (d *Dir) Remove() error { return os.RemoveAll(d.path) }

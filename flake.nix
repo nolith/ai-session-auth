@@ -52,6 +52,24 @@
             "-w"
           ];
 
+          # geas ssh signs with a YubiKey: it needs OpenSSH's ssh-keygen
+          # with FIDO2 support (macOS's /usr/bin/ssh-keygen has none), ykman
+          # to find the YubiKey by serial and fido2-token to check it before
+          # enrolling. They come first on geas's own PATH; the caller's PATH,
+          # saved first, is what a session's harness gets back.
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postInstall = ''
+            wrapProgram $out/bin/geas \
+              --run 'export GEAS_UNWRAPPED_PATH="''${PATH-}"' \
+              --prefix PATH : ${
+                lib.makeBinPath [
+                  pkgs.openssh
+                  pkgs.yubikey-manager
+                  pkgs.libfido2
+                ]
+              }
+          '';
+
           # The tests run real Git, ps, ssh-keygen and /bin/sh.
           nativeCheckInputs = [
             pkgs.gitMinimal

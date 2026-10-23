@@ -272,7 +272,7 @@ func TestGrant(t *testing.T) {
 	if len(lines) != 5 || lines[0] != "Granting claude-phase7 SSH access as agent to: transcoder mac-lab" ||
 		!regexp.MustCompile(`^Until \d{4}-\d\d-\d\d \d\d:\d\d \S+ \(2h\)$`).MatchString(lines[1]) ||
 		lines[2] != "Signing with test-ca: enter its FIDO2 PIN, then touch it." ||
-		lines[3] != "Done. The certificate is in "+dir+"." {
+		lines[3] != `Done. A session of claude-phase7 picks it up within seconds; the agent connects with: ssh -F "$GEAS_SESSION_DIR/ssh/config" <host>` {
 		t.Fatalf("output:\n%s", out)
 	}
 	c, pub := certificate(t, "claude-phase7")
@@ -526,4 +526,34 @@ func TestMain(m *testing.M) {
 		panic("the tests need ssh-keygen on PATH")
 	}
 	os.Exit(m.Run())
+}
+
+// Inside a session, the agent's own certificate is the session's copy, and
+// show names the configuration to connect with.
+func TestShowInsideASession(t *testing.T) {
+	ssh, out, _ := tool(t)
+	session := testutil.SessionDir(t)
+	t.Setenv("GEAS_SESSION_DIR", session.Path())
+	t.Setenv("AGENT_SSH_NAME", "claude-phase7")
+	ctx := context.Background()
+	if code, err := ssh.Run(ctx, []string{"show"}); code != 1 || err == nil || err.Error() != "claude-phase7 has no certificate in this session: ask the human: geas ssh grant claude-phase7 <host>" {
+		t.Fatal(code, err)
+	}
+	agent := t.TempDir()
+	testutil.SSHCertificate(t, agent, "-5m:+2h", "host:transcoder")
+	raw, _ := os.ReadFile(filepath.Join(agent, CertificateFile))
+	if err := session.WriteFile(SessionCertificate, raw); err != nil {
+		t.Fatal(err)
+	}
+	want := keygenListing(t, filepath.Join(agent, CertificateFile)) + "config: " + filepath.Join(session.Path(), "ssh", "config") + "\n"
+	for _, args := range [][]string{{"show"}, {"show", "claude-phase7"}} {
+		out.Reset()
+		if code, err := ssh.Run(ctx, args); code != 0 || err != nil || out.String() != want {
+			t.Fatalf("%v: %d %v\n%s", args, code, err, out)
+		}
+	}
+	// Another agent's is in the agents' directory, as outside.
+	if code, err := ssh.Run(ctx, []string{"show", "opencode-x"}); code != 1 || err == nil || err.Error() != "opencode-x has no certificate" {
+		t.Fatal(code, err)
+	}
 }

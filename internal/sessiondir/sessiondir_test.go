@@ -160,6 +160,18 @@ func TestRemove(t *testing.T) {
 	if err := d.WriteFile("secrets/gitlab:gitlab.com", []byte("secret")); err != nil {
 		t.Fatal(err)
 	}
+	// One file, then the directory; a file already gone is no error.
+	for range 2 {
+		if err := d.RemoveFile("secrets/gitlab:gitlab.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.ReadFile("secrets/gitlab:gitlab.com"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("file left: %v", err)
+	}
+	if err := d.RemoveFile("../x"); err == nil {
+		t.Fatal("removed a file outside the directory")
+	}
 	if err := d.Remove(); err != nil {
 		t.Fatal(err)
 	}

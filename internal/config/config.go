@@ -87,7 +87,10 @@ type Config struct {
 	Wrapper *Wrapper
 	GitLab  []GitLabConfig
 	GitHub  []GitHubConfig
-	source  string // absolute path, for the reaper to load it again
+	// SSH hands the agent its SSH certificate from geas ssh grant: an entry
+	// {"type": "ssh"}, with no other field, at most once.
+	SSH    bool
+	source string // absolute path, for the reaper to load it again
 }
 
 // file is the configuration as it is written.
@@ -103,8 +106,7 @@ type file struct {
 const (
 	TypeGitLab = "gitlab"
 	TypeGitHub = "github"
-	// TypeSSH is reserved for SSH certificates, which a later version adds.
-	TypeSSH = "ssh"
+	TypeSSH    = "ssh"
 )
 
 // gitlabEntry and githubEntry are provider entries as they are written,
@@ -116,6 +118,11 @@ type gitlabEntry struct {
 type githubEntry struct {
 	Type string `json:"type"`
 	GitHubConfig
+}
+
+// sshEntry is the ssh provider's entry, which has nothing but its type.
+type sshEntry struct {
+	Type string `json:"type"`
 }
 
 // MarshalJSON writes the configuration as version 2.
@@ -130,6 +137,13 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}
 	for _, g := range c.GitHub {
 		raw, err := json.Marshal(githubEntry{TypeGitHub, g})
+		if err != nil {
+			return nil, err
+		}
+		f.Providers = append(f.Providers, raw)
+	}
+	if c.SSH {
+		raw, err := json.Marshal(sshEntry{TypeSSH})
 		if err != nil {
 			return nil, err
 		}
@@ -253,9 +267,15 @@ func parse(raw []byte) (Config, error) {
 			}
 			config.GitHub = append(config.GitHub, g.GitHubConfig)
 		case TypeSSH:
-			return config, fmt.Errorf("%s: provider type %q is not supported yet", where, kind.Type)
+			if err := strictDecode(entry, new(sshEntry)); err != nil {
+				return config, fmt.Errorf("%s: %w", where, err)
+			}
+			if config.SSH {
+				return config, errors.New(where + ": a second ssh provider: one hands the agent its certificate")
+			}
+			config.SSH = true
 		case "":
-			return config, errors.New(where + ` needs a "type": gitlab or github`)
+			return config, errors.New(where + ` needs a "type": gitlab, github or ssh`)
 		default:
 			return config, fmt.Errorf("%s: unknown provider type %q", where, kind.Type)
 		}
@@ -386,7 +406,7 @@ func (c Config) validate() error {
 	if math.IsNaN(c.SessionHours) || math.IsInf(c.SessionHours, 0) || c.SessionHours <= 0 || c.SessionHours > 48 {
 		return errors.New("session_hours must be greater than zero and at most 48")
 	}
-	if len(c.GitLab) == 0 && len(c.GitHub) == 0 {
+	if len(c.GitLab) == 0 && len(c.GitHub) == 0 && !c.SSH {
 		return errors.New("configure at least one provider")
 	}
 	if err := validateWrapper(c.Wrapper); err != nil {

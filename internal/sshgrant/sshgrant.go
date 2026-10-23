@@ -138,6 +138,12 @@ func (t *Tool) run(ctx context.Context, args []string) error {
 		if len(args) > 1 || hasOption(args) {
 			return errUsage{"usage: geas ssh show [AGENT]"}
 		}
+		// Inside a session, the agent's own certificate is the session's
+		// copy: a sandbox keeps the agents' directory out of reach.
+		own := os.Getenv("AGENT_SSH_NAME")
+		if os.Getenv("GEAS_SESSION_DIR") != "" && (len(args) == 0 || Slug(args[0]) == Slug(own)) {
+			return showSession(t.Stdout, own)
+		}
 		if len(args) == 0 {
 			return list(t.Stdout, t.Now())
 		}

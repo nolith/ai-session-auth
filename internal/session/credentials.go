@@ -9,6 +9,7 @@ import (
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
+	"github.com/nolith/geas/internal/provider/sshcert"
 	"github.com/nolith/geas/internal/sessiondir"
 )
 
@@ -16,7 +17,7 @@ import (
 var renderers = map[string]provider.Renderer{}
 
 func init() {
-	for _, r := range []provider.Renderer{gitlab.Renderer{}, github.Renderer{}} {
+	for _, r := range []provider.Renderer{gitlab.Renderer{}, github.Renderer{}, sshcert.Renderer{}} {
 		renderers[r.Kind()] = r
 	}
 }
@@ -63,7 +64,8 @@ func newCredentials(dir *sessiondir.Dir) *credentials {
 }
 
 // put stores c as p's credential, replacing any earlier one; every file is
-// replaced atomically.
+// replaced atomically. A credential without a secret, such as an SSH
+// certificate, which is all files, writes none.
 func (s *credentials) put(p provider.Provider, c provider.Credential) error {
 	renderer, ok := renderers[p.Kind()]
 	if !ok {
@@ -75,8 +77,10 @@ func (s *credentials) put(p provider.Provider, c provider.Credential) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err = s.dir.WriteFile(secret, []byte(c.Secret)); err != nil {
-		return err
+	if c.Secret != "" {
+		if err = s.dir.WriteFile(secret, []byte(c.Secret)); err != nil {
+			return err
+		}
 	}
 	for rel, raw := range c.Files {
 		if err = s.dir.WriteFile(rel, raw); err != nil {
@@ -90,4 +94,28 @@ func (s *credentials) put(p provider.Provider, c provider.Credential) error {
 	}
 	kind[p.ID()] = c
 	return renderer.Render(s.dir, kind)
+}
+
+// drop removes c, p's credential, from the session: its files, and its
+// kind's tool configuration rendered again from what is left of the kind,
+// which may be nothing. Only a Watcher's credential goes away while the
+// session runs.
+func (s *credentials) drop(p provider.Provider, c provider.Credential) error {
+	renderer, ok := renderers[p.Kind()]
+	if !ok {
+		return errors.New("no renderer for provider kind " + p.Kind())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kind := s.byKind[p.Kind()]
+	delete(kind, p.ID())
+	if err := renderer.Render(s.dir, kind); err != nil {
+		return err
+	}
+	for rel := range c.Files {
+		if err := s.dir.RemoveFile(rel); err != nil {
+			return err
+		}
+	}
+	return nil
 }

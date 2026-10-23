@@ -216,6 +216,9 @@ func configCheck(output io.Writer, path string, settings config.Config) {
 	for _, g := range settings.GitHub {
 		fmt.Fprintf(output, "  github:%s  as %s\n", g.Host, g.ExpectedUser)
 	}
+	if settings.SSH {
+		fmt.Fprintln(output, "  ssh  the agent's certificate from geas ssh grant")
+	}
 }
 
 // harness is the command after `run`, without its "--".

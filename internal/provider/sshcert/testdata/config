@@ -1,0 +1,15 @@
+# Written by geas for this session; replaced whole when the certificate
+# changes. Replaces ~/.ssh/config entirely: no agent forwarding, no shared
+# connections, no other keys, no new host keys.
+Host *
+  User agent
+  IdentityFile "$GEAS_SESSION_DIR/ssh/id_ed25519"
+  CertificateFile "$GEAS_SESSION_DIR/ssh/id_ed25519-cert.pub"
+  IdentitiesOnly yes
+  IdentityAgent none
+  ForwardAgent no
+  ControlMaster no
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile "$HOME/.ssh/known_hosts"
+  UpdateHostKeys no

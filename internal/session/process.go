@@ -42,11 +42,25 @@ func appendGitConfig(env map[string]string, entries [][2]string) error {
 // inheritedCredentials never reach the harness or the reaper.
 var inheritedCredentials = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "CI_JOB_TOKEN", "SSH_AUTH_SOCK", "GH_DEBUG", "GLAB_DEBUG", "GLAB_DEBUG_HTTP"}
 
+// UnwrappedPath is the variable a packaging wrapper that puts geas's own
+// tools first on PATH, such as the flake's ssh-keygen with FIDO2 support,
+// saves the caller's PATH in: the harness gets that PATH back, unchanged.
+const UnwrappedPath = "GEAS_UNWRAPPED_PATH"
+
+// unwrapPath restores the PATH a packaging wrapper saved in env.
+func unwrapPath(env map[string]string) {
+	if path, ok := env[UnwrappedPath]; ok {
+		env["PATH"] = path
+		delete(env, UnwrappedPath)
+	}
+}
+
 // sessionEnvironment is the harness's environment: base without inherited
 // credentials, with the providers' exported variables, the session's own,
 // and Git configured for the session.
 func sessionEnvironment(base []string, dir *sessiondir.Dir, exported map[string]string) ([]string, error) {
 	env := procenv.Map(base)
+	unwrapPath(env)
 	for _, key := range inheritedCredentials {
 		delete(env, key)
 	}
@@ -112,9 +126,12 @@ func Nested(args []string) error {
 		// Not wrapped: a path error would print as a bare permission error.
 		return errors.New("GEAS_SESSION_DIR names no usable session directory; unset GEAS_SESSION_DIR to start a new session")
 	}
+	env := procenv.Map(os.Environ())
+	unwrapPath(env)
+	os.Setenv("PATH", env["PATH"])
 	executable, err := exec.LookPath(args[0])
 	if err != nil {
 		return errors.New("cannot start harness; check executable and arguments")
 	}
-	return syscall.Exec(executable, args, os.Environ())
+	return syscall.Exec(executable, args, procenv.List(env))
 }

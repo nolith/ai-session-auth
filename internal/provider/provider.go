@@ -25,7 +25,8 @@ import (
 type Provider interface {
 	// ID is unique within a session, e.g. "gitlab:gitlab.com".
 	ID() string
-	// Kind groups providers for their kind's Renderer: "gitlab", "github".
+	// Kind groups providers for their kind's Renderer: "gitlab", "github",
+	// "ssh".
 	Kind() string
 	// Setup declares what the provider adds to the session before the
 	// harness starts. No network call; it must not block.
@@ -47,15 +48,16 @@ type Provider interface {
 // Everything specific to one forge or tool stays in the provider's package;
 // only what several providers share, or the session itself acts on, is here.
 type Setup struct {
-	// Env is exported to the harness, e.g. GLAB_CONFIG_DIR and
-	// GH_PROMPT_DISABLED. "$GEAS_SESSION_DIR" expands to the session's
+	// Env is exported to the harness, e.g. GLAB_CONFIG_DIR,
+	// GH_PROMPT_DISABLED or AGENT_SSH_NAME. "$GEAS_SESSION_DIR" expands to the session's
 	// directory. Two providers may set the same variable only to the same
 	// value, and none may set one of the session's own; see MergeEnv.
 	Env map[string]string
 	// Git lists the hosts git reaches over HTTPS with this provider's token.
 	Git []GitHost
 	// Protect lists the user's own credential files and directories that
-	// the agent must never read: the issuer login, refresh tokens. Resolved
+	// the agent must never read: the issuer login, refresh tokens, other
+	// agents' keys. Resolved
 	// the way the tool itself resolves them at run time (environment
 	// overrides first, then the OS default), from the user's environment,
 	// never hard-coded, so that the sandbox follows the tool.
@@ -164,4 +166,18 @@ func MergeEnv(providers []Provider, reserved func(name string) bool) (map[string
 // ledger already holds enough to revoke the credential.
 type Settler interface {
 	Settle(ctx context.Context, l *ledger.Ledger) error
+}
+
+// A Watcher's credential comes and goes from outside the session, such as
+// an SSH certificate the human grants while the agent runs. The session
+// calls Watch after Acquire, whether Acquire failed or not, and again after
+// each answer, until the session ends; a Watcher's credential is never
+// refreshed.
+type Watcher interface {
+	// Watch waits until the credential differs from held, the one the
+	// session holds (the zero Credential when it holds none), and returns
+	// the new one; or, while it holds one, why that one is no longer
+	// usable, such as an expired or deleted certificate, after which the
+	// session holds none. It returns ctx's error once ctx ends.
+	Watch(ctx context.Context, held Credential) (Credential, error)
 }

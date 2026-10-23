@@ -119,7 +119,9 @@ func TestConfigCheck(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	path := filepath.Join(xdg, "geas", "config.json")
 	os.MkdirAll(filepath.Dir(path), 0700)
-	raw, _ := json.Marshal(testutil.Config())
+	settings := testutil.Config()
+	settings.SSH = true
+	raw, _ := json.Marshal(settings)
 	os.WriteFile(path, raw, 0600)
 	stdout := os.Stdout
 	captured, _ := os.CreateTemp(t.TempDir(), "stdout")
@@ -127,7 +129,7 @@ func TestConfigCheck(t *testing.T) {
 	code, err := execute(context.Background(), []string{"config", "check"}, nil)
 	os.Stdout = stdout
 	out, _ := os.ReadFile(captured.Name())
-	want := path + ": version 2, session_hours 24\n  gitlab:gitlab.com  issuer bearer, as alice\n  github:github.com  as alice\n"
+	want := path + ": version 2, session_hours 24\n  gitlab:gitlab.com  issuer bearer, as alice\n  github:github.com  as alice\n  ssh  the agent's certificate from geas ssh grant\n"
 	if code != 0 || err != nil || string(out) != want {
 		t.Fatalf("%d %v:\n%s", code, err, out)
 	}

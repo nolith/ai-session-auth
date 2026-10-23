@@ -166,6 +166,6 @@ func (t *Tool) grant(agent string, hosts []string, duration, caName string) erro
 	if err = os.Rename(signed, filepath.Join(dir, CertificateFile)); err != nil {
 		return err
 	}
-	fmt.Fprintln(t.Stdout, "Done. The certificate is in "+dir+".")
+	fmt.Fprintln(t.Stdout, "Done. A session of "+name+" picks it up within seconds; the agent connects with: ssh -F \"$GEAS_SESSION_DIR/ssh/config\" <host>")
 	return nil
 }

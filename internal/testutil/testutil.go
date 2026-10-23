@@ -1,7 +1,8 @@
 // Package testutil holds the fixtures and fakes several test packages share:
 // configuration values, an HTTP transport answering as a provider would, the
-// fake glab script the provider and session tests run, session directories
-// and golden files.
+// fake glab script the provider and session tests run, fake tools on PATH,
+// SSH keys and certificates from a software CA, session directories and
+// golden files.
 package testutil
 
 import (

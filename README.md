@@ -76,7 +76,9 @@ Standard GitHub and GitLab SSH remotes work without unlocking your SSH keyring.
 - `geas allowed URL`, which tells from the configuration alone whether a
   session's Git gets a credential for a remote.
 - `geas ssh`: short-lived SSH certificates for agents, signed with an agent
-  CA on a YubiKey, for the hosts you name.
+  CA on a YubiKey, for the hosts you name, handed to a session's agent as
+  an `ssh_config` in its session directory, including a grant made while
+  it runs.
 - Atomic GitHub state updates, private secret files, and locking across sessions.
 - No tokens in normal launcher output, command-line arguments, or Git URLs.
 
@@ -257,7 +259,8 @@ command, names another. It is version 2, a list of providers:
   "session_hours": 24,
   "providers": [
     { "type": "gitlab", "host": "gitlab.com", "issuer": { "type": "glab" }, "expected_user": "...", "namespaces": ["..."], "permissions": ["..."] },
-    { "type": "github", "host": "github.com", "client_id": "...", "expected_user": "...", "state_file": "...", "owners": ["..."] }
+    { "type": "github", "host": "github.com", "client_id": "...", "expected_user": "...", "state_file": "...", "owners": ["..."] },
+    { "type": "ssh" }
   ]
 }
 ```
@@ -268,7 +271,7 @@ command, names another. It is version 2, a list of providers:
 | `session_hours` | the session's length, 24 by default, at most 48                                                            |
 | `wrapper`       | optional: `command`, the program and arguments the harness starts through, and `early_exit_hint`           |
 | `no_new_privs`  | Linux only: `true` sets no_new_privs on geas before anything runs; refused on macOS                        |
-| `providers`     | one entry per credential source, by `type`: `gitlab` (one per instance) or `github`; one provider per host |
+| `providers`     | one entry per credential source, by `type`: `gitlab` (one per instance), `github` or `ssh`; one per host   |
 
 A `gitlab` provider has `host` (such as `gitlab.com`, a host name in lower
 case, without scheme or port), `issuer`, `expected_user`,
@@ -276,8 +279,9 @@ its allowlist (see "Allowlist" above) and `permissions`; the `github`
 provider has `host` (`github.com`, the only one supported), `client_id`,
 `expected_user`, `state_file`, and `owners` or `repositories`. Relative
 paths are relative to the configuration's directory; `~/` is your home.
-Unknown fields are refused, with their name. The type `ssh` is reserved for
-a later version and refused for now.
+Unknown fields are refused, with their name. The `ssh` provider, at most
+one, has no other field: it hands the agent the SSH certificate you grant
+it with `geas ssh grant` (see "SSH access for agents").
 
 `geas config check` loads the configuration, refuses it as `geas run` would,
 and lists its providers:
@@ -287,6 +291,7 @@ $ geas config check
 /home/alice/.config/geas/config.json: version 2, session_hours 24
   gitlab:gitlab.com  issuer glab, as alice
   github:github.com  as alice
+  ssh  the agent's certificate from geas ssh grant
 ```
 
 `geas allowed URL` tells whether a session's Git would get a credential for a
@@ -459,6 +464,7 @@ Until a provider is ready, its tools see no credential:
 | :---------------------- | :---------------------------------------------------------------------------------------------------- |
 | Git, through the helper | `geas credential` waits up to 30 s for the provider's marker, then tells Git to quit, with the reason |
 | `glab`, `gh`            | not logged in; agents retry                                                                           |
+| `ssh -F`, the session's | no `ssh/config` yet: the agent asks you to run `geas ssh grant`, which reaches it within seconds      |
 
 A GitLab mint takes about 3 s, so the helper's 30 s cover a slow network ten
 times over and still fail well inside an agent's tool timeout. A provider that
@@ -591,26 +597,31 @@ The harness inherits the launcher's environment without `GH_TOKEN`,
 | `GLAB_CONFIG_DIR`                        | `$GEAS_SESSION_DIR/glab`                                                        | GitLab      |
 | `GH_CONFIG_DIR`                          | `$GEAS_SESSION_DIR/gh`                                                          | GitHub      |
 | `GH_PROMPT_DISABLED`                     | `1`                                                                             | GitHub      |
+| `AGENT_SSH_NAME`                         | `claude-myproject`, the agent's SSH name                                        | SSH         |
 
-`PATH` is unchanged. Two providers may set one variable only to the same
+`PATH` is unchanged: the flake's package puts `ssh-keygen`, `ykman` and
+`fido2-token` first on geas's own `PATH` (see "SSH access for agents"), and
+saves yours in `GEAS_UNWRAPPED_PATH` first, which the harness gets back. Two providers may set one variable only to the same
 value, and none may set one of the session's own; anything else stops the
 session before it starts.
 
 The session directory, owner-only (mode 700, every file mode 600, each
 replaced atomically):
 
-| File                            | Written by                                                           | Read by                             |
-| :------------------------------ | :------------------------------------------------------------------- | :---------------------------------- |
-| `ledger`                        | the launcher, before each mint; the reaper                           | the launcher and the reaper         |
-| `gitconfig`                     | the launcher, at start                                               | Git, through `include.path`         |
-| `git/hosts.json`                | the launcher, at start: hosts and allowlists                         | `geas credential`                   |
-| `secrets/<provider>`            | the launcher, when a credential arrives or is refreshed              | `geas credential`                   |
-| `markers/<provider>`            | the launcher: `pending`, then `ready` or `failed` with the reason    | `geas credential`, `geas status`    |
-| `markers/sandbox`               | the launcher, with a wrapper: the background sandbox check's verdict | `geas status`                       |
-| `glab/config.yml`               | the GitLab renderer, one entry per host                              | `glab`                              |
-| `gh/hosts.yml`, `gh/config.yml` | the GitHub renderer                                                  | `gh`                                |
-| `sandbox/policy.json`           | the launcher, at start                                               | `geas sandbox check`                |
-| `sandbox/nono.json`             | the launcher, at start                                               | the sandbox, `GEAS_SANDBOX_PROFILE` |
+| File                                        | Written by                                                                                 | Read by                             |
+| :------------------------------------------ | :----------------------------------------------------------------------------------------- | :---------------------------------- |
+| `ledger`                                    | the launcher, before each mint; the reaper                                                 | the launcher and the reaper         |
+| `gitconfig`                                 | the launcher, at start                                                                     | Git, through `include.path`         |
+| `git/hosts.json`                            | the launcher, at start: hosts and allowlists                                               | `geas credential`                   |
+| `secrets/<provider>`                        | the launcher, when a credential arrives or is refreshed; not for SSH                       | `geas credential`                   |
+| `markers/<provider>`                        | the launcher: `pending`, then `ready` or `failed` with the reason                          | `geas credential`, `geas status`    |
+| `markers/sandbox`                           | the launcher, with a wrapper: the background sandbox check's verdict                       | `geas status`                       |
+| `glab/config.yml`                           | the GitLab renderer, one entry per host                                                    | `glab`                              |
+| `gh/hosts.yml`, `gh/config.yml`             | the GitHub renderer                                                                        | `gh`                                |
+| `ssh/id_ed25519`, `ssh/id_ed25519-cert.pub` | the SSH provider: the agent's key and certificate, copied; removed once expired or dropped | `ssh`                               |
+| `ssh/config`                                | the SSH renderer, with the key and certificate; removed with them                          | `ssh -F`                            |
+| `sandbox/policy.json`                       | the launcher, at start                                                                     | `geas sandbox check`                |
+| `sandbox/nono.json`                         | the launcher, at start                                                                     | the sandbox, `GEAS_SANDBOX_PROFILE` |
 
 `<provider>` is a provider's ID, such as `gitlab:gitlab.com`. `glab` and `gh`
 may write their own files into their directories; a renderer replaces its
@@ -681,6 +692,47 @@ public key and the handle's path, and nothing else: add
 public key to the hosts. It refuses without a terminal and inside a
 session, like `grant`.
 
+### In a session
+
+With `{ "type": "ssh" }` among the providers, a session names its agent
+when it starts: the tool is the base name of the first word after
+`geas run --`, and the name is `<tool>-<workspace>`, as `geas ssh name`
+finds it, outside the sandbox. The harness gets it as `AGENT_SSH_NAME`.
+When there is no name, the provider fails, and the session starts all the
+same.
+
+Once the harness runs, the provider checks that the agent has a key and a
+certificate for it, valid now, and copies both into the session directory,
+mode 600, with `ssh/config`: the agent connects with
+
+```bash
+ssh -F "$GEAS_SESSION_DIR/ssh/config" transcoder 'uptime'
+```
+
+That configuration replaces `~/.ssh/config` entirely: user `agent`, the
+session's key and certificate only (`IdentitiesOnly yes`,
+`IdentityAgent none`), no agent forwarding, no shared connections,
+`BatchMode yes`, and your own `~/.ssh/known_hosts`, strictly, without
+adding to it. A sandbox needs to grant only the session directory: every
+agent's key, in `$XDG_STATE_HOME/geas/agents`, is in the session's
+protected paths.
+
+Without a valid certificate, the `ssh` marker is `failed`, with what to do:
+`ask the human: geas ssh grant <name> <host>`. Every 3 seconds the
+provider looks at the agent's directory, a `stat` of three files, and reads
+it again when one changed: a grant made while the session runs reaches the
+agent within seconds, and turns the marker `ready`. When the certificate
+the session holds expires, or `geas ssh drop` deletes it, the session's
+copies and `ssh/config` go, and the marker turns `failed` again. There is
+nothing to revoke: a certificate expires on its own, within 12 hours.
+
+Inside a session, `geas ssh show` and `geas ssh show <its own name>` read
+the session's copy, since a sandbox keeps the agents' directory out of
+reach, and also print the configuration's path. `grant` and `enroll`
+refuse to run there.
+
+### Hosts
+
 geas does not set up hosts. A host lets an agent in when its `sshd`
 trusts the agent CAs' public keys for the user `agent` (`TrustedUserCAKeys`)
 and accepts the principal `host:<its host name>` for that user (an
@@ -689,7 +741,10 @@ and accepts the principal `host:<its host name>` for that user (an
 
 `geas ssh` needs `ssh-keygen` with FIDO2 support, OpenSSH's own (macOS's
 `/usr/bin/ssh-keygen` has none), `ykman` (yubikey-manager) and
-`fido2-token` (libfido2) on `PATH`.
+`fido2-token` (libfido2) on `PATH`. The flake's package wraps `geas` so
+that nixpkgs' `openssh`, `yubikey-manager` and `libfido2` come first on its
+`PATH`, whatever yours has; a session's harness gets your `PATH` back
+unchanged.
 
 ## Limits and isolation
 
@@ -705,7 +760,8 @@ the harness its temporary tokens.
 
 Each session writes the paths a sandbox around the harness must protect into
 its directory: `sandbox/policy.json` lists them neutrally, `deny` (your glab
-and gh logins, a stored issuer PAT, the GitHub App state and its lock, and
+and gh logins, a stored issuer PAT, the GitHub App state and its lock,
+every agent's SSH key in `$XDG_STATE_HOME/geas/agents`, and
 `$XDG_STATE_HOME/geas` as a whole), `read` and `reopen` (the session's own
 directory, inside the denied state directory), and `sandbox/nono.json` is the
 same as a [nono](https://github.com/nolabs-ai/nono) profile fragment with
@@ -807,7 +863,10 @@ agent names with and without herdr (a fake `herdr`), durations and host
 names, the CA lists and the YubiKey picked by serial (a fake `ykman`),
 grants end to end with a software CA standing in for the YubiKey, `show`
 against `ssh-keygen -L`, `drop`, `enroll` with fakes, and the refusals
-without a terminal and inside a session.
+without a terminal and inside a session; the SSH provider with expired,
+future, foreign and valid certificates, its watch picking up a grant, a
+re-grant and a drop, the `ssh/config` golden file read back by `ssh -G`,
+and a session whose harness gets a certificate granted while it runs.
 Provider APIs are simulated; tests do not use real credentials.
 CI runs `nix flake check` on Linux and macOS with Go from nixpkgs-unstable:
 formatting, vet, race-enabled tests, and the build.

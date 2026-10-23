@@ -50,7 +50,8 @@ func TestLoadVersion2(t *testing.T) {
   "session_hours": 12,
   "providers": [
     {"type": "gitlab", "host": "gitlab.com", "issuer": {"type": "bearer", "token_file": "issuer.txt"}, "expected_user": "alice", "namespaces": ["group"], "permissions": ["read_project"]},
-    {"type": "github", "host": "github.com", "client_id": "app", "expected_user": "alice", "state_file": "~/state/github.json", "owners": ["alice"]}
+    {"type": "github", "host": "github.com", "client_id": "app", "expected_user": "alice", "state_file": "~/state/github.json", "owners": ["alice"]},
+    {"type": "ssh"}
   ]
 }`)
 	c, err := Load(path)
@@ -58,7 +59,7 @@ func TestLoadVersion2(t *testing.T) {
 		t.Fatal(err)
 	}
 	home, _ := os.UserHomeDir()
-	if c.SessionHours != 12 || len(c.GitLab) != 1 || len(c.GitHub) != 1 || c.Source() != path {
+	if c.SessionHours != 12 || len(c.GitLab) != 1 || len(c.GitHub) != 1 || !c.SSH || c.Source() != path {
 		t.Fatalf("%+v", c)
 	}
 	if c.GitLab[0].Issuer.TokenFile != filepath.Join(filepath.Dir(path), "issuer.txt") || c.GitHub[0].StateFile != filepath.Join(home, "state", "github.json") {
@@ -67,8 +68,12 @@ func TestLoadVersion2(t *testing.T) {
 	// session_hours defaults to 24, and what MarshalJSON writes loads back.
 	c.SessionHours = 0
 	again, err := load(t, c)
-	if err != nil || again.SessionHours != 24 || !slices.Equal(again.GitLab[0].Namespaces, []string{"group"}) || !slices.Equal(again.GitHub[0].Owners, []string{"alice"}) {
+	if err != nil || again.SessionHours != 24 || !again.SSH || !slices.Equal(again.GitLab[0].Namespaces, []string{"group"}) || !slices.Equal(again.GitHub[0].Owners, []string{"alice"}) {
 		t.Fatalf("%+v %v", again, err)
+	}
+	// The ssh provider alone is a configuration.
+	if c, err = Load(write(t, `{"version": 2, "providers": [{"type": "ssh"}]}`)); err != nil || !c.SSH {
+		t.Fatalf("%+v %v", c, err)
 	}
 	// The shipped example must load as it is.
 	if _, err := Load(filepath.Join("..", "..", "config.example.json")); err != nil {
@@ -106,9 +111,10 @@ func TestVersion2Refusals(t *testing.T) {
 	}{
 		{`{"version": 3, "providers": []}`, "configuration version 3 is not supported: geas reads version 2"},
 		{`{"version": 2, "providers": []}`, "configure at least one provider"},
-		{`{"version": 2, "providers": [{"type": "ssh"}]}`, `providers[0]: provider type "ssh" is not supported yet`},
+		{`{"version": 2, "providers": [{"type": "ssh", "name": "claude"}]}`, `providers[0]: unknown field "name"`},
+		{`{"version": 2, "providers": [{"type": "ssh"}, {"type": "ssh"}]}`, `providers[1]: a second ssh provider: one hands the agent its certificate`},
 		{`{"version": 2, "providers": [{"type": "bitbucket"}]}`, `providers[0]: unknown provider type "bitbucket"`},
-		{`{"version": 2, "providers": [{"host": "gitlab.com"}]}`, `providers[0] needs a "type": gitlab or github`},
+		{`{"version": 2, "providers": [{"host": "gitlab.com"}]}`, `providers[0] needs a "type": gitlab, github or ssh`},
 		{`{"version": 2, "providers": ["gitlab"]}`, `providers[0] must be an object`},
 		{`{"version": 2, "providers": [{"type": "github", "host": "github.com", "groups": ["x"]}]}`, `providers[0]: unknown field "groups"`},
 		{`{"version": 2, "providers": [], "unknown": true}`, `unknown field "unknown"`},

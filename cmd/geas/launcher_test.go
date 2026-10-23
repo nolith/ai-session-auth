@@ -38,9 +38,9 @@ func TestMain(m *testing.M) {
 		main()
 	}
 	// The launcher's own re-executions: the reaper, Git's credential helper
-	// and the background sandbox check; and geas status, which a harness
-	// runs as $GEAS_TEST_BINARY.
-	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential" || os.Args[1] == "status" || os.Args[1] == "sandbox") {
+	// and the background sandbox check; and geas status and geas ssh, which
+	// a harness runs as $GEAS_TEST_BINARY.
+	if len(os.Args) > 1 && (strings.HasPrefix(os.Args[1], "_") || os.Args[1] == "credential" || os.Args[1] == "status" || os.Args[1] == "sandbox" || os.Args[1] == "ssh") {
 		main()
 	}
 	os.Exit(m.Run())
@@ -580,6 +580,17 @@ func TestNestedRunSharesTheSession(t *testing.T) {
 	if raw, err := os.ReadFile(out); err != nil || string(raw) != dir.Path()+"\n" {
 		t.Fatalf("harness saw %q %v", raw, err)
 	}
+	// A packaging wrapper's PATH stays the wrapper's: the command gets the
+	// caller's back.
+	wrapped, _ := json.Marshal([]string{"run", "--", "/bin/sh", "-c", "echo \"$PATH ${GEAS_UNWRAPPED_PATH-unset}\" >" + shellQuote(out)})
+	launcher = exec.Command(os.Args[0])
+	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(wrapped), "GEAS_SESSION_DIR="+dir.Path(), "PATH=/wrapper/bin:"+os.Getenv("PATH"), "GEAS_UNWRAPPED_PATH=/usr/bin:/bin")
+	if output, err := launcher.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, output)
+	}
+	if raw, err := os.ReadFile(out); err != nil || string(raw) != "/usr/bin:/bin unset\n" {
+		t.Fatalf("harness saw %q %v", raw, err)
+	}
 	// A GEAS_SESSION_DIR naming no session is refused, not trusted.
 	launcher = exec.Command(os.Args[0])
 	launcher.Env = append(os.Environ(), "GEAS_TEST_ARGS="+string(args), "GEAS_SESSION_DIR="+filepath.Join(t.TempDir(), "20261022T213405Z-0011223344556677"))
@@ -858,5 +869,47 @@ func TestNoNewPrivs(t *testing.T) {
 	output, err := launcher.CombinedOutput()
 	if err != nil || string(output) != "NoNewPrivs:\t1\n" {
 		t.Fatalf("%v: %q", err, output)
+	}
+}
+
+// The ssh provider names the agent after the harness, exports the name,
+// protects every agent's key, and hands over a certificate granted while
+// the session runs: the harness waits for its failed marker, the test
+// grants, and the harness sees the copy in the session directory.
+func TestSSHCertificateGrantedDuringTheSession(t *testing.T) {
+	signal := t.TempDir()
+	script := `until grep -qs failed "$GEAS_SESSION_DIR/markers/ssh"; do sleep 0.02; done
+echo "name $AGENT_SSH_NAME"
+"$GEAS_TEST_BINARY" status
+touch ` + shellQuote(filepath.Join(signal, "failed")) + `
+until grep -qs ready "$GEAS_SESSION_DIR/markers/ssh"; do sleep 0.05; done
+"$GEAS_TEST_BINARY" status
+"$GEAS_TEST_BINARY" ssh show | grep -A1 Principals
+grep -c agents "$GEAS_SESSION_DIR/sandbox/policy.json"
+cd "$GEAS_SESSION_DIR/ssh" && ls -l id_ed25519 id_ed25519-cert.pub config | cut -c1-10`
+	// The harness is /bin/sh, so the agent is sh-<workspace>, and the name
+	// the launcher inherits needs no herdr.
+	s := launchConfig(t, config.Config{SessionHours: 1, SSH: true}, script, "AGENT_SSH_NAME=sh-test")
+	deadline := time.Now().Add(20 * time.Second)
+	for _, err := os.Stat(filepath.Join(signal, "failed")); err != nil; _, err = os.Stat(filepath.Join(signal, "failed")) {
+		if time.Now().After(deadline) {
+			s.launcher.Process.Kill()
+			t.Fatal("the harness never saw the failed marker")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	testutil.SSHCertificate(t, filepath.Join(s.state, "geas", "agents", "sh-test"), "-5m:+2h", "host:transcoder")
+	s.wait(t)
+	output, _ := io.ReadAll(s.output)
+	for _, want := range []string{
+		"name sh-test\n",
+		"ssh  failed: sh-test has no key yet: ask the human: geas ssh grant sh-test <host>\n",
+		"ssh  ready\n",
+		"        Principals: \n                host:transcoder\n",
+		"1\n-rw-------\n-rw-------\n-rw-------\n",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("output lacks %q:\n%s", want, output)
+		}
 	}
 }

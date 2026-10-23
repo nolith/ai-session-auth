@@ -17,6 +17,7 @@ import (
 
 	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/credhelper"
+	"github.com/nolith/geas/internal/ledger"
 	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
@@ -59,6 +60,16 @@ func TestSessionEnvironmentAndGitRewrites(t *testing.T) {
 	// The tools on PATH are the real ones.
 	if env["PATH"] != procenv.Map(base)["PATH"] {
 		t.Fatalf("PATH changed: %s", env["PATH"])
+	}
+	// A packaging wrapper's PATH is the wrapper's business: the harness gets
+	// the caller's back.
+	wrapped := append(slices.Clone(base), "PATH=/nix/store/x-openssh/bin:/usr/bin", "GEAS_UNWRAPPED_PATH=/usr/bin")
+	unwrapped, err := sessionEnvironment(wrapped, session, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env := procenv.Map(unwrapped); env["PATH"] != "/usr/bin" || env["GEAS_UNWRAPPED_PATH"] != "" {
+		t.Fatalf("wrapped PATH: %q %q", env["PATH"], env["GEAS_UNWRAPPED_PATH"])
 	}
 	git, err := exec.LookPath("git")
 	if err != nil {
@@ -392,4 +403,99 @@ func TestSandboxVerdict(t *testing.T) {
 	if got := checkReason(strings.Repeat("x", 2000)); len(got) != 1003 {
 		t.Errorf("not shortened: %d", len(got))
 	}
+}
+
+// watcher is an ssh provider whose Watch answers what the test sends it.
+type watcher struct {
+	answers chan watched
+	held    chan provider.Credential
+}
+
+type watched struct {
+	c   provider.Credential
+	err error
+}
+
+func (w *watcher) ID() string                                 { return "ssh" }
+func (w *watcher) Kind() string                               { return "ssh" }
+func (w *watcher) Setup() provider.Setup                      { return provider.Setup{} }
+func (w *watcher) Revoke(context.Context, ledger.Entry) error { return ledger.ErrGone }
+func (w *watcher) Acquire(context.Context, *ledger.Ledger) (provider.Credential, error) {
+	return provider.Credential{}, errors.New("no certificate yet")
+}
+func (w *watcher) Refresh(_ context.Context, c provider.Credential) (provider.Credential, error) {
+	return c, nil
+}
+func (w *watcher) Watch(ctx context.Context, held provider.Credential) (provider.Credential, error) {
+	w.held <- held
+	select {
+	case a := <-w.answers:
+		return a.c, a.err
+	case <-ctx.Done():
+		return provider.Credential{}, ctx.Err()
+	}
+}
+
+// A Watcher's credential arrives after a failed acquisition, is replaced,
+// goes away with its files and its configuration, and comes back; the
+// marker follows.
+func TestAcquireFollowsAWatcher(t *testing.T) {
+	dir := testutil.SessionDir(t)
+	t.Setenv("HOME", t.TempDir())
+	store := newCredentials(dir)
+	w := &watcher{answers: make(chan watched), held: make(chan provider.Credential)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		acquire(ctx, store, nil, w, nil)
+	}()
+	marker := func(want string) {
+		t.Helper()
+		m, err := dir.Marker("ssh")
+		if err != nil || m.State != want {
+			t.Fatalf("marker %+v %v, want %s", m, err, want)
+		}
+	}
+	files := func(c provider.Credential) map[string][]byte { return c.Files }
+	cert := func(n string) provider.Credential {
+		return provider.Credential{Files: map[string][]byte{"ssh/id_ed25519": []byte("key"), "ssh/id_ed25519-cert.pub": []byte("cert " + n)}}
+	}
+	if held := <-w.held; held.Files != nil {
+		t.Fatalf("held %+v after a failure", held)
+	}
+	marker(sessiondir.Failed)
+	w.answers <- watched{c: cert("1")}
+	if held := <-w.held; string(files(held)["ssh/id_ed25519-cert.pub"]) != "cert 1" {
+		t.Fatalf("held %+v", held)
+	}
+	marker(sessiondir.Ready)
+	for _, rel := range []string{"ssh/id_ed25519", "ssh/id_ed25519-cert.pub", "ssh/config"} {
+		if _, err := dir.ReadFile(rel); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+	}
+	if _, err := dir.ReadFile("secrets/ssh"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a secret for a credential without one: %v", err)
+	}
+	w.answers <- watched{err: errors.New("the certificate of claude-test expired")}
+	if held := <-w.held; held.Files != nil {
+		t.Fatalf("held %+v after it expired", held)
+	}
+	if m, _ := dir.Marker("ssh"); m.State != sessiondir.Failed || m.Reason != "the certificate of claude-test expired" {
+		t.Fatalf("marker %+v", m)
+	}
+	for _, rel := range []string{"ssh/id_ed25519", "ssh/id_ed25519-cert.pub", "ssh/config"} {
+		if _, err := dir.ReadFile(rel); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s left: %v", rel, err)
+		}
+	}
+	w.answers <- watched{c: cert("2")}
+	<-w.held
+	marker(sessiondir.Ready)
+	if raw, _ := dir.ReadFile("ssh/id_ed25519-cert.pub"); string(raw) != "cert 2" {
+		t.Fatalf("certificate %q", raw)
+	}
+	cancel()
+	<-done
 }

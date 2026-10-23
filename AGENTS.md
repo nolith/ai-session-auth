@@ -25,6 +25,8 @@ dependencies outside the standard library.
                                config.yml renderer
     internal/provider/github/  GitHub App tokens: state file, refresh, the gh
                                hosts.yml renderer
+    internal/provider/sshcert/ the agent's certificate from `geas ssh grant`, watched
+                               for new grants, and the ssh_config renderer
     internal/sandbox/          the sandbox policy the providers' protected paths make,
                                and `geas sandbox check`
     internal/sandbox/nono/     renders that policy as a nono profile fragment
@@ -34,8 +36,7 @@ dependencies outside the standard library.
 
 Later phases add the rest of the end state:
 
-    internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
-    nix/ scripts/ skills/      packaging and skills, with the ssh work
+    nix/ scripts/ skills/      packaging and skills
 
 ## Rules
 

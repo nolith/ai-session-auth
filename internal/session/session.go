@@ -26,6 +26,7 @@ import (
 	"github.com/nolith/geas/internal/provider"
 	"github.com/nolith/geas/internal/provider/github"
 	"github.com/nolith/geas/internal/provider/gitlab"
+	"github.com/nolith/geas/internal/provider/sshcert"
 	"github.com/nolith/geas/internal/sessiondir"
 	"github.com/nolith/geas/internal/timing"
 )
@@ -232,12 +233,12 @@ func mark(dir *sessiondir.Dir, id, state, reason string) error {
 	return dir.SetMarker(id, sessiondir.Marker{State: state, Reason: reason, Time: time.Now().UTC()})
 }
 
-// plan builds the configured providers, without a network call. A provider
-// that cannot even be prepared, such as GitLab without glab or with an
-// unreadable issuer file, is kept for its setup and configuration, and failed
-// lists why: it never acquires anything, and the session starts all the
-// same.
-func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers []provider.Provider, failed map[string]string) {
+// plan builds the configured providers for the harness command args,
+// without a network call. A provider that cannot even be prepared, such as
+// GitLab without glab or with an unreadable issuer file, or SSH without the
+// agent's name, is kept for its setup and configuration, and failed lists
+// why: it never acquires anything, and the session starts all the same.
+func plan(ctx context.Context, settings config.Config, args []string, api *api.API, timer *timing.Timer) (providers []provider.Provider, failed map[string]string) {
 	failed = map[string]string{}
 	for _, c := range settings.GitLab {
 		gl, err := gitlab.New(c, settings.Duration(), api, nil)
@@ -250,6 +251,13 @@ func plan(settings config.Config, api *api.API, timer *timing.Timer) (providers 
 	}
 	for _, c := range settings.GitHub {
 		providers = append(providers, github.New(c, api))
+	}
+	if settings.SSH {
+		ssh, err := sshcert.New(ctx, args)
+		if err != nil {
+			failed[ssh.ID()] = reason(err)
+		}
+		providers = append(providers, ssh)
 	}
 	return providers, failed
 }
@@ -306,7 +314,7 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	if err != nil {
 		return ExitNotStarted, err
 	}
-	providers, failed := plan(settings, api, timer)
+	providers, failed := plan(ctx, settings, args, api, timer)
 	id, err := sessiondir.NewID(time.Now())
 	if err != nil {
 		return ExitNotStarted, err
@@ -446,15 +454,20 @@ func earlyExitHint(w *config.Wrapper, code int, interrupted error, ran time.Dura
 // credential's files and its kind's tool configuration, then p's ready
 // marker, or a failed one with the reason; then it settles what is left,
 // such as GitLab's id lookup, and keeps the credential fresh for as long as
-// ctx lasts. Nothing prints: the harness owns the terminal.
+// ctx lasts, or, for a Watcher, follows its credential whether it arrived
+// or not. Nothing prints: the harness owns the terminal.
 func acquire(ctx context.Context, store *credentials, book *ledger.Ledger, p provider.Provider, steps *timing.Timer) {
 	c, err := p.Acquire(ctx, book)
 	if err == nil {
 		err = store.put(p, c)
 	}
+	watcher, watches := p.(provider.Watcher)
 	if err != nil {
 		mark(store.dir, p.ID(), sessiondir.Failed, reason(err))
 		steps.Step("failed")
+		if watches {
+			follow(ctx, store, p, watcher, provider.Credential{})
+		}
 		return
 	}
 	if mark(store.dir, p.ID(), sessiondir.Ready, "") != nil {
@@ -466,7 +479,43 @@ func acquire(ctx context.Context, store *credentials, book *ledger.Ledger, p pro
 		// name the ledger holds.
 		settler.Settle(ctx, book)
 	}
+	if watches {
+		follow(ctx, store, p, watcher, c)
+		return
+	}
 	keepFresh(ctx, store, p, c, systemClock)
+}
+
+// follow follows a Watcher's credential for as long as ctx lasts, starting
+// from held, the one the session holds (none after a failure): each new
+// one is written and makes p's marker ready; one that is no longer usable
+// is removed from the session directory, and p's marker turns failed with
+// the reason. Nothing prints, as the harness owns the terminal.
+func follow(ctx context.Context, store *credentials, p provider.Provider, w provider.Watcher, held provider.Credential) {
+	for {
+		next, err := w.Watch(ctx, held)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			store.drop(p, held)
+			held = provider.Credential{}
+			mark(store.dir, p.ID(), sessiondir.Failed, reason(err))
+			continue
+		}
+		if err = store.put(p, next); err != nil {
+			// Whatever was written stays until the next answer replaces
+			// it; the pause keeps a write that keeps failing from
+			// spinning.
+			mark(store.dir, p.ID(), sessiondir.Failed, reason(err))
+			if systemClock.sleep(ctx, refreshRetry) != nil {
+				return
+			}
+			continue
+		}
+		held = next
+		mark(store.dir, p.ID(), sessiondir.Ready, "")
+	}
 }
 
 // refreshMargin is how long before a credential expires keepFresh replaces
