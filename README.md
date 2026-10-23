@@ -115,7 +115,7 @@ reason, and `geas status` says what to fix.
 
 ```bash
 nix develop          # Go, gopls, gh, glab and the formatters
-nix fmt              # gofmt and nixfmt through treefmt
+nix fmt              # gofmt, nixfmt and rumdl through treefmt
 nix flake check -L   # formatting, vet, race-enabled tests and the build
 ```
 

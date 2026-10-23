@@ -20,6 +20,7 @@
           runtimeInputs = [
             pkgs.go
             pkgs.nixfmt
+            pkgs.rumdl
           ];
           settings = lib.importTOML ./treefmt.toml;
         };
@@ -111,6 +112,7 @@
             pkgs.gh
             pkgs.glab
             pkgs.nixfmt
+            pkgs.rumdl
             # Plain treefmt, reading treefmt.toml from the working tree.
             pkgs.treefmt
           ];

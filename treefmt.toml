@@ -10,3 +10,10 @@ includes = ["*.go"]
 [formatter.nixfmt]
 command = "nixfmt"
 includes = ["*.nix"]
+
+# Markdown, with the rules in .rumdl.toml: fixes what it can, and fails on
+# what it cannot, so that nix flake check refuses it.
+[formatter.rumdl]
+command = "rumdl"
+options = ["check", "--fix", "--no-cache"]
+includes = ["*.md"]

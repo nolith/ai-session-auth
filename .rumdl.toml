@@ -1,0 +1,23 @@
+# rumdl, the Markdown linter: run by treefmt (nix fmt, nix flake check),
+# which fixes what it can and fails on the rest.
+[global]
+flavor = "gfm"
+
+# Prose wraps at 80 columns; tables and code blocks keep their lines whole.
+[MD013]
+line-length = 80
+code-blocks = false
+tables = false
+
+# The README's centered logo.
+[MD033]
+allowed-elements = ["p", "img"]
+
+# Tables keep their columns aligned in the source, not only when rendered.
+[MD060]
+enabled = true
+style = "aligned"
+
+[per-file-ignores]
+# The README opens with the logo, before its title.
+"README.md" = ["MD041"]

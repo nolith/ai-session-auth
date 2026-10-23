@@ -6,16 +6,21 @@ The code layout and the rules that keep it in shape are in
 ## Checks
 
 ```bash
-nix develop          # Go, gopls, gh, glab, nixfmt and treefmt
+nix develop          # Go, gopls, gh, glab, nixfmt, rumdl and treefmt
 
 gofmt -l .           # must print nothing
 go vet ./...
 go test -race ./...
 
-nix fmt              # gofmt and nixfmt, through treefmt
+nix fmt              # gofmt, nixfmt and rumdl, through treefmt
 treefmt              # the same, from treefmt.toml (inside nix develop)
 nix flake check -L   # authoritative: formatting, vet, race tests, build
 ```
+
+Markdown is linted and fixed by [rumdl](https://github.com/rvben/rumdl),
+configured in [`.rumdl.toml`](../.rumdl.toml): prose wraps at 80 columns,
+table columns stay aligned. `rumdl check .` lists what it cannot fix
+itself.
 
 Some launcher and reaper tests run `ps` to check process groups, so they
 fail where `ps` cannot run, such as inside a sandbox; `nix flake check`
