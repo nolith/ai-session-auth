@@ -52,9 +52,10 @@
             "-w"
           ];
 
-          # The tests run real Git, ps and /bin/sh.
+          # The tests run real Git, ps, ssh-keygen and /bin/sh.
           nativeCheckInputs = [
             pkgs.gitMinimal
+            pkgs.openssh
             pkgs.ps
           ];
           checkFlags = [ "-race" ];

@@ -28,12 +28,13 @@ dependencies outside the standard library.
     internal/sandbox/          the sandbox policy the providers' protected paths make,
                                and `geas sandbox check`
     internal/sandbox/nono/     renders that policy as a nono profile fragment
+    internal/sshgrant/         `geas ssh`, the human side of agent SSH access: grant,
+                               show, drop, enroll, list-cas, and the agent's name
     internal/testutil/         test fixtures, fakes, golden files and the fake glab/gh scripts
 
 Later phases add the rest of the end state:
 
     internal/provider/sshcert/ certificates from `geas ssh grant`, the ssh config
-    internal/sshgrant/         the human side: grant, show, drop, enroll, list-cas
     nix/ scripts/ skills/      packaging and skills, with the ssh work
 
 ## Rules
@@ -72,4 +73,5 @@ Later phases add the rest of the end state:
 
 Some launcher and reaper tests run `ps` to check process groups, so they fail
 where `ps` cannot run, such as inside a sandbox; `nix flake check` provides
-it. Do not tune those tests for a particular environment.
+it. Do not tune those tests for a particular environment. The `geas ssh`
+tests sign certificates with a real `ssh-keygen`, which must be on `PATH`.

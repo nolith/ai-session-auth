@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -205,4 +206,70 @@ func Golden(t *testing.T, path string, got []byte) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("%s differs from the golden file; got:\n%s", path, got)
 	}
+}
+
+// Executable writes an executable script named name into a new directory at
+// the front of PATH, standing in for a tool such as ykman or herdr.
+func Executable(t *testing.T, name, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// SSHCA creates a software ed25519 key in a new directory and returns its
+// path: an agent CA without a YubiKey, which ssh-keygen -s signs with alike.
+func SSHCA(t *testing.T) string {
+	t.Helper()
+	ca := filepath.Join(t.TempDir(), "ca")
+	SSHKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "test CA", "-f", ca)
+	return ca
+}
+
+// SSHCertificate gives the agent directory dir a key, unless it has one,
+// and a certificate for it, owner-only as geas ssh grant leaves them, signed
+// by a new software CA with ssh-keygen's validity, such as
+// 20260101000000:20260102000000, for the principals.
+func SSHCertificate(t *testing.T, dir, validity string, principals ...string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "id_ed25519")
+	if _, err := os.Stat(key); err != nil {
+		SSHKeygen(t, "-q", "-t", "ed25519", "-N", "", "-C", "agent:test", "-f", key)
+	}
+	signing := t.TempDir()
+	pub, err := os.ReadFile(key + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(signing, "id_ed25519.pub"), pub, 0600)
+	args := []string{"-q", "-s", SSHCA(t), "-I", "test@host 2026-01-01T00:00Z", "-z", "7", "-V", validity, "-O", "clear", "-O", "permit-pty"}
+	if len(principals) > 0 {
+		args = append(args, "-n", strings.Join(principals, ","))
+	}
+	SSHKeygen(t, append(args, filepath.Join(signing, "id_ed25519.pub"))...)
+	cert, err := os.ReadFile(filepath.Join(signing, "id_ed25519-cert.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, raw := range map[string][]byte{key + ".pub": pub, filepath.Join(dir, "id_ed25519-cert.pub"): cert} {
+		if err = os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		os.Chmod(path, 0600)
+	}
+}
+
+// SSHKeygen runs ssh-keygen, which the ssh tests need on PATH.
+func SSHKeygen(t *testing.T, args ...string) []byte {
+	t.Helper()
+	out, err := exec.Command("ssh-keygen", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen %v: %v\n%s", args, err, out)
+	}
+	return out
 }

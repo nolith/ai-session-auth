@@ -20,6 +20,7 @@ import (
 	"github.com/nolith/geas/internal/secretfile"
 	"github.com/nolith/geas/internal/session"
 	"github.com/nolith/geas/internal/sessiondir"
+	"github.com/nolith/geas/internal/sshgrant"
 	"github.com/nolith/geas/internal/timing"
 )
 
@@ -44,8 +45,11 @@ Commands:
                                 ready or failed with the reason
   sandbox check                 Inside a session: check that no protected path is
                                 readable and that the session directory is
+  ssh COMMAND                   Grant agents SSH certificates: grant, show, drop,
+                                enroll, list-cas, name; see geas ssh --help
 
-Requires Git, and glab in PATH for the glab issuer. Linux/macOS only.`)
+Requires Git, and glab in PATH for the glab issuer; geas ssh needs ssh-keygen,
+and ykman and fido2-token for the YubiKey. Linux/macOS only.`)
 }
 func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 	if len(args) > 0 && args[0] == "_reaper" {
@@ -70,6 +74,10 @@ func execute(ctx context.Context, args []string, api *api.API) (int, error) {
 			return 2, errors.New("usage: geas sandbox check")
 		}
 		return sandboxCheck(os.Stdout)
+	}
+	// geas ssh reads no configuration: its CA lists are files of their own.
+	if len(args) > 0 && args[0] == "ssh" {
+		return sshgrant.New().Run(ctx, args[1:])
 	}
 	flags := flag.NewFlagSet("geas", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
