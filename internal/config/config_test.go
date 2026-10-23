@@ -260,6 +260,40 @@ func TestGitLabNamespacedConfig(t *testing.T) {
 	}
 }
 
+// A wrapper names its program as an absolute path, a ~/ path, which is
+// expanded, or a name on PATH, and loads back as written.
+func TestWrapperConfig(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	for program, want := range map[string]string{"/nix/store/x/bin/agent-sandbox": "/nix/store/x/bin/agent-sandbox", "~/bin/agent-sandbox": filepath.Join(home, "bin", "agent-sandbox"), "agent-sandbox": "agent-sandbox"} {
+		c := testConfig()
+		c.Wrapper = &Wrapper{Command: []string{program, "--debug"}, EarlyExitHint: "skip the sandbox with AGENT_SANDBOX=off,\nsee why with AGENT_SANDBOX_DEBUG=1"}
+		loaded, err := load(t, c)
+		if err != nil || loaded.Wrapper == nil || !slices.Equal(loaded.Wrapper.Command, []string{want, "--debug"}) || loaded.Wrapper.EarlyExitHint != c.Wrapper.EarlyExitHint {
+			t.Errorf("%s: %+v %v", program, loaded.Wrapper, err)
+		}
+	}
+	if loaded, err := load(t, testConfig()); err != nil || loaded.Wrapper != nil {
+		t.Fatalf("no wrapper: %+v %v", loaded.Wrapper, err)
+	}
+	for name, w := range map[string]*Wrapper{
+		"no command":       {},
+		"empty program":    {Command: []string{""}},
+		"relative program": {Command: []string{"bin/agent-sandbox"}},
+		"NUL":              {Command: []string{"agent-sandbox", "a\x00b"}},
+		"escape in a hint": {Command: []string{"agent-sandbox"}, EarlyExitHint: "\x1b[31mred"},
+		"return in a hint": {Command: []string{"agent-sandbox"}, EarlyExitHint: "over\rwritten"},
+	} {
+		c := testConfig()
+		c.Wrapper = w
+		if c.validate() == nil {
+			t.Errorf("accepted %s", name)
+		}
+	}
+	if _, err := Load(write(t, `{"version": 2, "wrapper": {"command": ["x"], "hint": "y"}, "providers": []}`)); err == nil || err.Error() != `unknown field "hint"` {
+		t.Fatalf("unknown wrapper field: %v", err)
+	}
+}
+
 // The default path follows XDG_CONFIG_HOME, else ~/.config, on macOS too.
 func TestDefaultPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg")

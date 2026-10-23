@@ -260,6 +260,7 @@ command, names another. It is version 2, a list of providers:
 | :-------------- | :--------------------------------------------------------------------------------------------------------- |
 | `version`       | `2`, required                                                                                              |
 | `session_hours` | the session's length, 24 by default, at most 48                                                            |
+| `wrapper`       | optional: `command`, the program and arguments the harness starts through, and `early_exit_hint`           |
 | `providers`     | one entry per credential source, by `type`: `gitlab` (one per instance) or `github`; one provider per host |
 
 A `gitlab` provider has `host` (such as `gitlab.com`, a host name in lower
@@ -280,6 +281,29 @@ $ geas config check
   gitlab:gitlab.com  issuer glab, as alice
   github:github.com  as alice
 ```
+
+### The wrapper
+
+With a `wrapper`, such as a sandbox's launcher, geas starts the harness as
+the wrapper's `command` followed by the harness's own command line, with the
+session's environment already set, `GEAS_SESSION_DIR` and
+`GEAS_SANDBOX_PROFILE` included, so that the wrapper can grant the session's
+directory and apply its profile:
+
+```json
+"wrapper": {
+  "command": ["/usr/local/bin/agent-sandbox"],
+  "early_exit_hint": "skip the sandbox with AGENT_SANDBOX=off, see why with AGENT_SANDBOX_DEBUG=1"
+}
+```
+
+The program is an absolute path, a `~/` path or a name found on `PATH`.
+When the harness exits non-zero within 15 seconds of its start, by itself,
+geas prints `early_exit_hint` once it has exited, after everything else it
+prints: a wrapper that refuses to start the harness looks like that. It is
+never printed while the harness runs, after a clean exit, or when geas
+itself stopped the harness. A wrapper that cannot be started is geas's
+failure, exit code 125.
 
 ### Migrating from version 1
 
@@ -440,15 +464,15 @@ sent, is never cut short.
 
 125 covers everything geas does before the harness: a missing or invalid
 configuration, a session directory or a reaper it cannot create, a harness
-command it cannot start, and, inside a session, a nested `geas run` whose
+command or a wrapper it cannot start, and, inside a session, a nested `geas run` whose
 `GEAS_SESSION_DIR` is unusable. A launcher around geas tells from it that the
 harness never ran. A harness that itself exits 125 is passed through as it is.
 Outside `geas run`, a configuration error exits 1.
 
 geas prints nothing between the harness's start and its exit. Afterwards it
 may print the revocation's result, a revocation the reaper retries, the reason
-the session stopped the harness, and, with `GEAS_DEBUG=timing`, the
-providers' steps.
+the session stopped the harness, with `GEAS_DEBUG=timing` the providers'
+steps, and last the wrapper's `early_exit_hint`.
 
 ### The session directory
 

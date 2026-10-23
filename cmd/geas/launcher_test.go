@@ -707,3 +707,62 @@ fi`
 		t.Fatalf("session directories left: %v", left)
 	}
 }
+
+// fakeWrapper writes a wrapper that records its arguments and the session's
+// variables in log, one line each, then runs its arguments after its own
+// options, such as "--profile agent".
+func fakeWrapper(t *testing.T, log string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "wrapper")
+	script := "#!/bin/sh\nprintf 'wrapper %s|%s|%s\\n' \"$*\" \"$GEAS_SESSION_DIR\" \"$GEAS_SANDBOX_PROFILE\" >>" + shellQuote(log) + "\nwhile [ \"${1#--}\" != \"$1\" ]; do shift 2; done\nexec \"$@\"\n"
+
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The harness starts through the wrapper, with the session's variables
+// already set. A harness that exits non-zero at once gets the wrapper's
+// hint, after everything else geas prints; a clean exit gets none.
+func TestWrapperAndEarlyExitHint(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "wrapper.log")
+	c := config.Config{SessionHours: 1, GitLab: []config.GitLabConfig{testutil.GlabConfig()}, Wrapper: &config.Wrapper{
+		Command:       []string{fakeWrapper(t, log), "--profile", "agent"},
+		EarlyExitHint: "skip the sandbox with SANDBOX=off",
+	}}
+	s := launchConfig(t, c, untilSettled+"echo harness ran; exit 3")
+	raw, _ := io.ReadAll(s.output)
+	s.wait(t)
+	if code := s.launcher.ProcessState.ExitCode(); code != 3 {
+		t.Fatalf("exit %d", code)
+	}
+	if output := string(raw); !strings.HasPrefix(output, "harness ran\n") || !strings.HasSuffix(output, "GitLab session PAT revoked.\nskip the sandbox with SANDBOX=off\n") {
+		t.Fatalf("output:\n%s", output)
+	}
+	logged, err := os.ReadFile(log)
+	lines := strings.Split(strings.TrimSuffix(string(logged), "\n"), "\n")
+	if err != nil || len(lines) != 1 {
+		t.Fatalf("wrapper log: %q %v", logged, err)
+	}
+	fields := strings.Split(lines[0], "|")
+	if len(fields) != 3 || !strings.HasPrefix(fields[0], "wrapper --profile agent /bin/sh -c ") || !strings.Contains(fields[1], "/geas/sessions/") || fields[2] != fields[1]+"/sandbox/nono.json" {
+		t.Fatalf("the wrapper saw %q", lines[0])
+	}
+	// A clean exit: no hint.
+	s = launchConfig(t, c, untilSettled+"exit 0")
+	raw, _ = io.ReadAll(s.output)
+	s.wait(t)
+	if output := string(raw); s.launcher.ProcessState.ExitCode() != 0 || strings.Contains(output, "SANDBOX=off") {
+		t.Fatalf("clean exit: %d:\n%s", s.launcher.ProcessState.ExitCode(), output)
+	}
+	// A wrapper that cannot start is geas's failure, before the harness.
+	c.Wrapper.Command = []string{filepath.Join(t.TempDir(), "no-such-wrapper")}
+	raw, _ = json.Marshal(c)
+	path := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(path, raw, 0600)
+	output, code := runGeas(t, []string{"--config", path, "run", "--", "true"}, "PATH="+testutil.FakeGlab(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if code != 125 || output != "geas: cannot start the wrapper; check wrapper.command\n" {
+		t.Fatalf("no wrapper: exit %d: %q", code, output)
+	}
+}

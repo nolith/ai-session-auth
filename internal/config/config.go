@@ -62,19 +62,33 @@ type GitHubConfig struct {
 	Repositories []string `json:"repositories,omitempty"`
 }
 
+// Wrapper is the command geas starts the harness through, such as a
+// sandbox's launcher: geas runs Command, then the harness's command line,
+// with the session's environment already set.
+type Wrapper struct {
+	Command []string `json:"command"`
+	// EarlyExitHint is printed when the harness exits non-zero soon after it
+	// started, once it has exited: a wrapper that refused to start it looks
+	// like that, and the hint says how to find out why or go without it.
+	EarlyExitHint string `json:"early_exit_hint,omitempty"`
+}
+
 // Config is the configuration, its providers grouped by type, each type's in
 // the file's order.
 type Config struct {
 	SessionHours float64
-	GitLab       []GitLabConfig
-	GitHub       []GitHubConfig
-	source       string // absolute path, for the reaper to load it again
+	// Wrapper is nil without one: the harness starts directly.
+	Wrapper *Wrapper
+	GitLab  []GitLabConfig
+	GitHub  []GitHubConfig
+	source  string // absolute path, for the reaper to load it again
 }
 
 // file is the configuration as it is written.
 type file struct {
 	Version      int               `json:"version"`
 	SessionHours float64           `json:"session_hours,omitempty"`
+	Wrapper      *Wrapper          `json:"wrapper,omitempty"`
 	Providers    []json.RawMessage `json:"providers"`
 }
 
@@ -99,7 +113,7 @@ type githubEntry struct {
 
 // MarshalJSON writes the configuration as version 2.
 func (c Config) MarshalJSON() ([]byte, error) {
-	f := file{Version: Version, SessionHours: c.SessionHours}
+	f := file{Version: Version, SessionHours: c.SessionHours, Wrapper: c.Wrapper}
 	for _, g := range c.GitLab {
 		raw, err := json.Marshal(gitlabEntry{TypeGitLab, g})
 		if err != nil {
@@ -175,6 +189,12 @@ func Load(path string) (Config, error) {
 			return config, err
 		}
 	}
+	// The wrapper's program is found on PATH when it is a bare name.
+	if w := config.Wrapper; w != nil && strings.HasPrefix(w.Command[0], "~/") {
+		if w.Command[0], err = expandPath(w.Command[0], base); err != nil {
+			return config, err
+		}
+	}
 	for i := range config.GitLab {
 		if file := &config.GitLab[i].Issuer.TokenFile; *file != "" {
 			if *file, err = expandPath(*file, base); err != nil {
@@ -203,6 +223,7 @@ func parse(raw []byte) (Config, error) {
 	if config.SessionHours == 0 {
 		config.SessionHours = 24
 	}
+	config.Wrapper = f.Wrapper
 	for i, entry := range f.Providers {
 		where := fmt.Sprintf("providers[%d]", i)
 		var kind struct {
@@ -361,6 +382,9 @@ func (c Config) validate() error {
 	if len(c.GitLab) == 0 && len(c.GitHub) == 0 {
 		return errors.New("configure at least one provider")
 	}
+	if err := validateWrapper(c.Wrapper); err != nil {
+		return err
+	}
 	// A host has one provider: Git asks the credential helper by host.
 	hosts := map[string]bool{}
 	claim := func(host string) error {
@@ -384,6 +408,33 @@ func (c Config) validate() error {
 		}
 		if err := claim(g.Host); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateWrapper accepts a wrapper whose program is an absolute path, a
+// ~/ path or a bare name looked up on PATH, and a hint without control
+// characters but line breaks.
+func validateWrapper(w *Wrapper) error {
+	if w == nil {
+		return nil
+	}
+	if len(w.Command) == 0 || w.Command[0] == "" {
+		return errors.New("wrapper.command must name a program")
+	}
+	program := w.Command[0]
+	if !filepath.IsAbs(program) && !strings.HasPrefix(program, "~/") && strings.Contains(program, "/") {
+		return errors.New("wrapper.command's program must be an absolute path, a ~/ path or a name on PATH")
+	}
+	for _, arg := range w.Command {
+		if strings.ContainsRune(arg, 0) {
+			return errors.New("wrapper.command cannot contain NUL")
+		}
+	}
+	for _, r := range w.EarlyExitHint {
+		if (r < ' ' && r != '\n' && r != '\t') || r == 0x7f {
+			return errors.New("wrapper.early_exit_hint cannot contain control characters")
 		}
 	}
 	return nil

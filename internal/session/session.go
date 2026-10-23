@@ -271,6 +271,9 @@ var launchReaper = startReaper
 // harness starts, a failure returns ExitNotStarted; after, the exit code is
 // the harness's, unchanged, or 130 and 124 when the session interrupted it
 // or ran out of time. What the session minted is revoked on the way out.
+// With a wrapper, the harness starts as the wrapper's command followed by
+// args, and a harness that exits non-zero soon after its start gets the
+// wrapper's hint printed, last, once it has exited.
 func Run(ctx context.Context, settings config.Config, args []string, api *api.API, output io.Writer, timer *timing.Timer) (int, error) {
 	if len(args) == 0 {
 		return ExitNotStarted, errors.New("specify a harness command after run --")
@@ -331,6 +334,14 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 		}
 	}
 	timer.Step("plan")
+	// Last, after the revocation's lines: why the harness may have exited
+	// at once.
+	var hint string
+	defer func() {
+		if hint != "" {
+			fmt.Fprintln(output, hint)
+		}
+	}()
 	// The reaper's pipe: closed without "revoked", it revokes the ledger
 	// itself and removes the session's directory.
 	var reaper *os.File
@@ -343,10 +354,18 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 	}
 	timer.Step("reaper")
 	timer.HarnessStart()
-	h, err := startHarness(args, environment)
+	command := args
+	if settings.Wrapper != nil {
+		command = append(slices.Clone(settings.Wrapper.Command), args...)
+	}
+	h, err := startHarness(command, environment)
+	if err != nil && settings.Wrapper != nil {
+		return ExitNotStarted, errors.New("cannot start the wrapper; check wrapper.command")
+	}
 	if err != nil {
 		return ExitNotStarted, err
 	}
+	started := time.Now()
 	// Stopped, and waited for, before teardown revokes what they minted and
 	// removes the directory they write into.
 	acquiring, stop := context.WithCancel(ctx)
@@ -363,7 +382,25 @@ func Run(ctx context.Context, settings config.Config, args []string, api *api.AP
 			acquire(acquiring, store, book, p, timer.Child(p.ID()))
 		}()
 	}
-	return h.await(ctx, settings.Duration())
+	code, err := h.await(ctx, settings.Duration())
+	hint = earlyExitHint(settings.Wrapper, code, err, time.Since(started))
+	return code, err
+}
+
+// earlyExit is how soon a harness that exits non-zero has exited early: a
+// wrapper that refuses to start it, such as a sandbox missing a profile,
+// exits within a second or two, and an agent that ran for longer has failed
+// for its own reasons.
+const earlyExit = 15 * time.Second
+
+// earlyExitHint is the wrapper's hint when the harness exited by itself,
+// non-zero, within earlyExit of its start; interrupted is the error await
+// returned when the session stopped it instead.
+func earlyExitHint(w *config.Wrapper, code int, interrupted error, ran time.Duration) string {
+	if w == nil || code == 0 || interrupted != nil || ran >= earlyExit {
+		return ""
+	}
+	return w.EarlyExitHint
 }
 
 // acquire gets p's credential while the harness runs. It writes the

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nolith/geas/internal/config"
 	"github.com/nolith/geas/internal/credhelper"
 	"github.com/nolith/geas/internal/procenv"
 	"github.com/nolith/geas/internal/provider"
@@ -333,5 +334,32 @@ func TestRunWithoutAReaper(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(filepath.Join(state, "geas", "sessions")); len(left) != 0 {
 		t.Fatalf("session directories left: %v", left)
+	}
+}
+
+// The wrapper's hint is for a harness that exited by itself, non-zero,
+// within 15 s; never without a wrapper, after a clean exit, an interruption
+// or a long run.
+func TestEarlyExitHint(t *testing.T) {
+	w := &config.Wrapper{Command: []string{"sandbox"}, EarlyExitHint: "run without the sandbox with SANDBOX=off"}
+	for _, tc := range []struct {
+		name        string
+		wrapper     *config.Wrapper
+		code        int
+		interrupted error
+		ran         time.Duration
+		want        string
+	}{
+		{"early failure", w, 1, nil, time.Second, w.EarlyExitHint},
+		{"killed early", w, 137, nil, 14 * time.Second, w.EarlyExitHint},
+		{"clean exit", w, 0, nil, time.Second, ""},
+		{"no wrapper", nil, 1, nil, time.Second, ""},
+		{"no hint", &config.Wrapper{Command: []string{"sandbox"}}, 1, nil, time.Second, ""},
+		{"interrupted", w, 130, errors.New("session interrupted"), time.Second, ""},
+		{"long run", w, 1, nil, 15 * time.Second, ""},
+	} {
+		if got := earlyExitHint(tc.wrapper, tc.code, tc.interrupted, tc.ran); got != tc.want {
+			t.Errorf("%s: %q", tc.name, got)
+		}
 	}
 }
