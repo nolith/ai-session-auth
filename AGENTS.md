@@ -33,6 +33,7 @@ dependencies outside the standard library.
     internal/sshgrant/         `geas ssh`, the human side of agent SSH access: grant,
                                show, drop, enroll, list-cas, and the agent's name
     internal/testutil/         test fixtures, fakes, golden files and the fake glab/gh scripts
+    docs/                      the user documentation the README links to, one topic each
 
 Later phases add the rest of the end state:
 
@@ -59,8 +60,9 @@ Later phases add the rest of the end state:
 - Credentials land, atomically, in the files `glab`, `gh`, git and ssh
   already read, in the session directory. A renderer replaces its files
   whole, from every credential of its kind; its golden files under
-  `testdata/` pin the format, checked against the real tool. Nothing is hidden from a process running as the same user;
-  that is the sandbox's job.
+  `testdata/` pin the format, checked against the real tool. Nothing is
+  hidden from a process running as the same user; that is the sandbox's
+  job.
 
 ## Checks
 
