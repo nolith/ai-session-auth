@@ -99,7 +99,7 @@ func TestVersion1Refused(t *testing.T) {
 		{`{"session_hours": 24}`, `the configuration has no "version": write "version": 2`},
 	} {
 		_, err := Load(write(t, tc.raw))
-		if err == nil || !strings.HasPrefix(err.Error(), tc.want) || !strings.HasSuffix(err.Error(), `see "Migrating from version 1" in the README`) {
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) || strings.Contains(err.Error(), "README") {
 			t.Errorf("%s: %v", tc.raw, err)
 		}
 	}

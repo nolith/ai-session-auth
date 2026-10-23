@@ -366,13 +366,13 @@ func findVersion1(raw []byte) error {
 		}
 	}
 	if !slices.Contains(keys, "version") {
-		return fmt.Errorf(`the configuration has no "version": write "version": %d, see "Migrating from version 1" in the README`, Version)
+		return fmt.Errorf(`the configuration has no "version": write "version": %d`, Version)
 	}
 	return nil
 }
 
 func v1Error(where, field, hint string) error {
-	return fmt.Errorf(`%s%q is a version 1 field: %s; see "Migrating from version 1" in the README`, where, field, hint)
+	return fmt.Errorf(`%s%q is a version 1 field: %s`, where, field, hint)
 }
 
 // objectFields returns a JSON object's keys and values in the file's order.
